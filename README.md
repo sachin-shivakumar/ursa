@@ -8,6 +8,8 @@
 The flexible agentic workflow for accelerating scientific tasks. 
 Composes information flow between agents for planning, code writing and execution, and online research to solve complex problems.
 
+The original arxiv paper is [here](https://arxiv.org/abs/2506.22653).
+
 ## Installation
 You can install `ursa` via `pip` or `uv`.
 
@@ -114,6 +116,65 @@ Some suggestions for sandboxing the agent:
 - Creating a network blacklist/whitelist to ensure that network commands and webscraping are contained to safe sources
 
 You have a duty for ensuring that you use URSA responsibly.
+
+## Container image
+
+To enable limited sandboxing insofar as containerization does this, you can run
+the following commands:
+
+### Docker
+
+```shell
+# Pull the image
+docker pull ghcr.io/lanl/ursa
+
+# Run included example
+docker run -e "OPENAI_API_KEY"=$OPENAI_API_KEY ursa \
+    bash -c "uv run python examples/single_agent_examples/execution_agnet/integer_sum.py"
+
+# Run script from host system
+mkdir -p scripts
+echo "import ursa; print('Hello from ursa')" > scripts/my_script.py
+docker run -e "OPENAI_API_KEY"=$OPENAI_API_KEY \
+    --mount type=bind,src=$PWD/scripts,dst=/mnt/workspace \
+    ursa \
+    bash -c "uv run /mnt/workspace/my_script.py"
+```
+
+### Charliecloud
+
+[Charliecloud](https://charliecloud.io/) is a rootless alternative to docker
+that is sometimes preferred on HPC. The following commands replicate the
+behaviors above for docker.
+
+```shell
+# Pull the image
+ch-image pull ghcr.io/lanl/ursa
+
+# Convert image to sqfs, for use on another system
+ch-convert ursa ursa.sqfs
+
+# Run included example (if wanted, replace ursa with /path/to/ursa.sqfs)
+ch-run -W ursa \
+    --unset-env="*" \
+    --set-env \
+    --set-env="OPENAI_API_KEY"=$OPENAI_API_KEY \
+    --cd /app \
+    -- bash -c \
+    "uv run examples/single_agent_examples/execution_agnet/integer_sum.py"
+
+# Run script from host system (if wanted, replace ursa with /path/to/ursa.sqfs)
+mkdir -p scripts
+echo "import ursa; print('Hello from ursa')" > scripts/my_script.py
+ch-run -W ursa \
+    --unset-env="*" \
+    --set-env \
+    --set-env="OPENAI_API_KEY"=$OPENAI_API_KEY \
+    --bind ${PWD}/scripts:/mnt/workspace \
+    --cd /app \
+    -- bash -c \
+    "uv run /mnt/workspace/integer_sum.py"
+```
 
 ## Development Dependencies
 
