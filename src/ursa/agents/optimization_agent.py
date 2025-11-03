@@ -20,10 +20,14 @@ from ..prompt_library.optimization_prompts import (
     math_formulator_prompt,
     solver_selector_prompt,
     verifier_prompt,
+    optimizer_prompt,
 )
 from ..tools.feasibility_tools import feasibility_check_auto as fca
+from ..tools.optimality_tools import optimality_check as oc
+from ..tools.write_code import write_python
+from ..tools.run_command import run_cmd
 from ..util.helperFunctions import extract_tool_calls, run_tool_calls
-from ..util.optimization_schema import ProblemSpec, SolverSpec
+from ..util.optimization_schema import ProblemSpec, SolverSpec, SolutionSpec
 from .base import BaseAgent
 
 # --- ANSI color codes ---
@@ -39,6 +43,7 @@ class OptimizerState(TypedDict):
     problem: str
     problem_spec: ProblemSpec
     solver: SolverSpec
+    solution_spec: SolutionSpec
     code: str
     problem_diagnostic: List[Dict]
     summary: str
@@ -55,7 +60,8 @@ class OptimizationAgent(BaseAgent):
         self.math_formulator_prompt = math_formulator_prompt
         self.discretizer_prompt = discretizer_prompt
         self.feasibility_prompt = feasibility_prompt
-        self.tools = [fca]  # [run_cmd, write_code, search_tool, fca]
+        self.optimizer_prompt = optimizer_prompt
+        self.tools = [fca, write_python, run_cmd]  # [run_cmd, write_code, search_tool, fca, oc]
         self.llm = self.llm.bind_tools(self.tools)
         self.tool_maps = {
             (getattr(t, "name", None) or getattr(t, "__name__", None)): t
@@ -67,11 +73,19 @@ class OptimizationAgent(BaseAgent):
     # Define the function that calls the model
     def extractor(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()
-        new_state["problem"] = self.llm.invoke([
-            SystemMessage(content=self.extractor_prompt),
-            HumanMessage(content=new_state["user_input"]),
-        ]).content
 
+        if hasattr(new_state,'problem_spec') and hasattr(new_state['problem_spec'],'notes') and hasattr(new_state["problem_spec"]["notes"],"verifier"):
+            new_state["problem"] = self.llm.invoke([
+            SystemMessage(content=self.extractor_prompt), 
+            SystemMessage(content=new_state["problem_spec"]["notes"]["verifier"]),
+            HumanMessage(content=new_state["user_input"]),
+            ]).content    
+        else:
+            new_state["problem"] = self.llm.invoke([
+            SystemMessage(content=self.extractor_prompt), 
+            HumanMessage(content=new_state["user_input"]),
+            ]).content
+        
         new_state["problem_diagnostic"] = []
 
         print("Extractor:\n")
@@ -176,12 +190,30 @@ class OptimizationAgent(BaseAgent):
         pprint.pprint(new_state["problem_spec"])
         return new_state
 
+    def optimizer(self, state:OptimizerState) -> OptimizerState:
+        new_state = state.copy()
+
+        llm_out = self.llm.with_structured_output(
+            SolutionSpec, include_raw=True
+        ).invoke([
+            SystemMessage(content=self.optimizer_prompt),
+            HumanMessage(content=str(state["problem_spec"]) + state["code"]),
+        ])
+        new_state["solution_spec"] = llm_out["parsed"]
+        if hasattr(llm_out, "tool_calls"):
+            tool_log = run_tool_calls(llm_out, self.tool_maps)
+            new_state["problem_diagnostic"].extend(tool_log)
+
+        print("Optimizer:\n ")
+        pprint.pprint(new_state["solution_spec"])
+        return new_state 
+
     def explainer(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()
 
         new_state["summary"] = self.llm.invoke([
             SystemMessage(content=self.explainer_prompt),
-            HumanMessage(content=state["problem"] + str(state["problem_spec"])),
+            HumanMessage(content=state["problem"] + str(state["problem_spec"]) + str(state["solution_spec"])),
             *state["problem_diagnostic"],
         ]).content
 
@@ -200,6 +232,7 @@ class OptimizationAgent(BaseAgent):
         self.add_node(graph, self.explainer, "Explainer")
         self.add_node(graph, self.tester, "Feasibility Tester")
         self.add_node(graph, self.discretizer, "Discretizer")
+        self.add_node(graph, self.optimizer, "Optimizer")
 
         graph.add_edge(START, "Problem Extractor")
         graph.add_edge("Problem Extractor", "Math Formulator")
@@ -212,14 +245,32 @@ class OptimizationAgent(BaseAgent):
         graph.add_edge("Solver Selector", "Code Generator")
         graph.add_edge("Code Generator", "Feasibility Tester")
         graph.add_edge("Feasibility Tester", "Verifier")
+        # graph.add_edge("Verifier", "Optimizer")
         graph.add_conditional_edges(
             "Verifier",
             should_continue,
-            {"continue": "Explainer", "error": "Problem Extractor"},
+            {"continue": "Optimizer", "error": "Problem Extractor"},
         )
+        graph.add_edge("Optimizer", "Explainer")
         graph.add_edge("Explainer", END)
 
-        return graph.compile()
+        compiled_graph = graph.compile()
+        # try:
+        #     import matplotlib.pyplot as plt
+        #     import matplotlib.image as mpimg 
+        #     import io
+        #     png_bytes = compiled_graph.get_graph().draw_mermaid_png()
+        #     img = mpimg.imread(io.BytesIO(png_bytes), format='png')  # decode bytes -> array
+
+        #     plt.imshow(img)
+        #     plt.axis('off')
+        #     plt.show()
+        # except Exception as e:
+        #     # This requires some extra dependencies and is optional
+        #     print(e)
+        #     pass
+
+        return compiled_graph
 
     def _invoke(
         self, inputs: Mapping[str, Any], recursion_limit: int = 100000, **_
@@ -236,89 +287,76 @@ class OptimizationAgent(BaseAgent):
         return self._action.invoke(inputs, config)
 
 
-#########  try:
-#########      png_bytes = compiled_graph.get_graph().draw_mermaid_png()
-#########      img = mpimg.imread(io.BytesIO(png_bytes), format='png')  # decode bytes -> array
+# @tool
+# def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
+#     """
+#     Run a commandline command from using the subprocess package in python
 
-#########      plt.imshow(img)
-#########      plt.axis('off')
-#########      plt.show()
-#########  except Exception as e:
-#########      # This requires some extra dependencies and is optional
-#########      print(e)
-#########      pass
+#     Args:
+#         query: commandline command to be run as a string given to the subprocess.run command.
+#     """
+#     workspace_dir = state["workspace"]
+#     print("RUNNING: ", query)
+#     try:
+#         process = subprocess.Popen(
+#             query.split(" "),
+#             stdout=subprocess.PIPE,
+#             stderr=subprocess.PIPE,
+#             text=True,
+#             cwd=workspace_dir,
+#         )
 
+#         stdout, stderr = process.communicate(timeout=60000)
+#     except KeyboardInterrupt:
+#         print("Keyboard Interrupt of command: ", query)
+#         stdout, stderr = "", "KeyboardInterrupt:"
 
-@tool
-def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
-    """
-    Run a commandline command from using the subprocess package in python
+#     print("STDOUT: ", stdout)
+#     print("STDERR: ", stderr)
 
-    Args:
-        query: commandline command to be run as a string given to the subprocess.run command.
-    """
-    workspace_dir = state["workspace"]
-    print("RUNNING: ", query)
-    try:
-        process = subprocess.Popen(
-            query.split(" "),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=workspace_dir,
-        )
-
-        stdout, stderr = process.communicate(timeout=60000)
-    except KeyboardInterrupt:
-        print("Keyboard Interrupt of command: ", query)
-        stdout, stderr = "", "KeyboardInterrupt:"
-
-    print("STDOUT: ", stdout)
-    print("STDERR: ", stderr)
-
-    return f"STDOUT: {stdout} and STDERR: {stderr}"
+#     return f"STDOUT: {stdout} and STDERR: {stderr}"
 
 
-@tool
-def write_code(
-    code: str, filename: str, state: Annotated[dict, InjectedState]
-) -> str:
-    """
-    Writes python or Julia code to a file in the given workspace as requested.
+# @tool
+# def write_code(
+#     code: str, filename: str, state: Annotated[dict, InjectedState]
+# ) -> str:
+#     """
+#     Writes python or Julia code to a file in the given workspace as requested.
 
-    Args:
-        code: The code to write
-        filename: the filename with an appropriate extension for programming language (.py for python, .jl for Julia, etc.)
+#     Args:
+#         code: The code to write
+#         filename: the filename with an appropriate extension for programming language (.py for python, .jl for Julia, etc.)
 
-    Returns:
-        Execution results
-    """
-    workspace_dir = state["workspace"]
-    print("Writing filename ", filename)
-    try:
-        # Extract code if wrapped in markdown code blocks
-        if "```" in code:
-            code_parts = code.split("```")
-            if len(code_parts) >= 3:
-                # Extract the actual code
-                if "\n" in code_parts[1]:
-                    code = "\n".join(code_parts[1].strip().split("\n")[1:])
-                else:
-                    code = code_parts[2].strip()
+#     Returns:
+#         Execution results
+#     """
+#     workspace_dir = state["workspace"]
+#     print("Writing filename ", filename)
+#     try:
+#         # Extract code if wrapped in markdown code blocks
+#         if "```" in code:
+#             code_parts = code.split("```")
+#             if len(code_parts) >= 3:
+#                 # Extract the actual code
+#                 if "\n" in code_parts[1]:
+#                     code = "\n".join(code_parts[1].strip().split("\n")[1:])
+#                 else:
+#                     code = code_parts[2].strip()
 
-        # Write code to a file
-        code_file = os.path.join(workspace_dir, filename)
+#         # Write code to a file
+#         code_file = os.path.join(workspace_dir, filename)
 
-        with open(code_file, "w") as f:
-            f.write(code)
-        print(f"Written code to file: {code_file}")
+#         with open(code_file, "w") as f:
+#             f.write(code)
+#         print(f"Written code to file: {code_file}")
 
-        return f"File {filename} written successfully."
+#         return f"File {filename} written successfully."
 
-    except Exception as e:
-        print(f"Error generating code: {str(e)}")
-        # Return minimal code that prints the error
-        return f"Failed to write {filename} successfully."
+#     except Exception as e:
+#         print(f"Error generating code: {str(e)}")
+#         # Return minimal code that prints the error
+#         return f"Failed to write {filename} successfully."
 
 
 search_tool = DuckDuckGoSearchResults(output_format="json", num_results=10)

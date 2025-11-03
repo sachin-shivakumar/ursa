@@ -66,6 +66,14 @@ class ProblemSpec(TypedDict):
     status: Literal["DRAFT", "VERIFIED", "ERROR"]  # problem status
     notes: NotesType  # structured notes data
 
+class SolutionSpec(TypedDict):
+    primal_solution: str # list of decision variable values for the primal problem, if primal is solved
+    dual_solution: str # list of decision variable values for the dual problem, if dual is solved
+    primal_objective: str # value of the primal objective
+    dual_objective: str # value of the dual objective
+    duality_gap: float # duality gap
+    feasibility: str # information on solution feasibility  
+    optimality_conditions: str # sympy-representable mathematical expressions for KKT conditions or primal/dual first-order optimality conditions for the optimization problem
 
 class SolverSpec(TypedDict):
     solver: str  # name of the solver, replace with Literal["Gurobi","Ipopt",...] to restrict solvers

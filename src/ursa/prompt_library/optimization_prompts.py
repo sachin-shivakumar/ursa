@@ -99,6 +99,7 @@ Constraints & style guide:
 4. Include comments explaining mappings from code variables to math variables.  
 5. Provide minimal CLI wrapper & instructions.  
 6. Add unit-test stub that checks feasibility if sample data provided.  
+7. Avoid commercial licensed solvers when possible.
 """
 
 verifier_prompt = """
@@ -115,6 +116,17 @@ Actions:
 • If all good → ProblemSpec.status = ‘VERIFIED’; ProblemSpec.notes.verifier = ‘PASS: …’. 
 • Else → ProblemSpec.status = ‘ERROR’; ProblemSpec.notes.verifier = detailed list of issues.  
 Output updated JSON only.
+"""
+
+optimizer_prompt = """
+Your goal is to solve the optimization problem specified in the problem_spec data structure. 
+Follow the steps listed below to ensure repeatability and robustness:
+1) Formulate the conditions of optimality; store it in the `solution_spec.optimality_conditions' data
+    structure.
+2) Run the python code stored under `code' data structure in the folder `workspace'; 
+   Find the optimal solution and extract the optimal solution from the code.
+3) Make sure to treat primal and dual solutions appropriately and store the information in appropriate
+   data structure specified by the `solution_spec'.
 """
 
 explainer_prompt = """
