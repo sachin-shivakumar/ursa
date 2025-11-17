@@ -4,19 +4,15 @@ import argparse
 import hashlib
 import json
 import sqlite3
-import ssl
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
 
-import httpx
-import litellm
 import randomname
-import truststore
 import yaml
+from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
-from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 # rich console stuff for beautification
@@ -29,18 +25,6 @@ from rich.text import Text
 from ursa.agents import ExecutionAgent, PlanningAgent
 from ursa.observability.timing import render_session_summary
 from ursa.util.logo_generator import kickoff_logo
-
-ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # use macOS Keychain
-litellm.client_session = httpx.Client(verify=ctx, timeout=30)
-
-
-# removing this since we're doing checkpoint/restart from the same thread-id
-# so instead, we're going to just use the thread-id as the
-# workspace.  this limits us to only having one checkpoint/restart per
-# run (since it's using the same workspace / directory), but that seems
-# likely the normal mode of use
-# tid = "run-" + __import__("uuid").uuid4().hex[:8]
-
 
 console = get_console()  # always returns the same instance
 
@@ -734,10 +718,10 @@ def setup_agents(workspace: str, model) -> tuple[str, tuple, tuple]:
     )
 
 
-def setup_llm(model_name):
-    model = ChatLiteLLM(
+def setup_llm(model_name: str):
+    model = init_chat_model(
         model=model_name,
-        max_tokens=10000,
+        max_completion_tokens=10000,
         max_retries=2,
         model_kwargs={
             # "reasoning": {"effort": "high"},
@@ -750,7 +734,7 @@ def setup_llm(model_name):
 def setup_workspace(
     user_specified_workspace: str | None,
     project: str = "run",
-    model_name: str = "openai/o3-mini",
+    model_name: str = "openai:gpt-5-mini",
 ) -> str:
     if user_specified_workspace is None:
         print("No workspace specified, creating one for this project!")
@@ -1071,11 +1055,15 @@ def main(
                     problem_text=problem,
                     workspace=workspace,
                     out_dir=workspace,
-                    size="1536x1024",
+                    # let aspect pick a good size automatically; or keep size if you prefer
+                    # size="1536x1024",
                     background="opaque",
                     quality="high",
                     n=4,
-                    style="random-scene",  # 'random-scene', 'mascot', 'patch', 'sigil', 'gradient-glyph', 'brutalist'
+                    style="random",
+                    mode="scene",
+                    aspect="wide",  # optional, auto-sets to a wide rectangle
+                    style_intensity="overt",  # optional, stronger systle signaling
                     console=console,
                     on_done=lambda p: console.print(
                         Panel.fit(
@@ -1098,17 +1086,17 @@ def main(
                     background="opaque",
                     quality="high",
                     n=4,
-                    style="mascot",  # 'random-scene', 'mascot', 'patch', 'sigil', 'gradient-glyph', 'brutalist'
+                    style="sticker",
                     console=console,
                     on_done=lambda p: console.print(
                         Panel.fit(
-                            f"[bold yellow]Project mascot art saved:[/] {p}",
+                            f"[bold yellow]Project sticker art saved:[/] {p}",
                             border_style="yellow",
                         )
                     ),
                     on_error=lambda e: console.print(
                         Panel.fit(
-                            f"[bold red]Art mascot generation failed:[/] {e}",
+                            f"[bold red]Art sticker generation failed:[/] {e}",
                             border_style="red",
                         )
                     ),
@@ -1503,9 +1491,10 @@ def parse_args_and_user_inputs():
     DEFAULT_MODELS = tuple(
         models_cfg.get("choices")
         or (
-            "openai/gpt-5",
-            "openai/o3",
-            "openai/o3-mini",
+            "openai:gpt-5",
+            "openai:gpt-5-mini",
+            "openai:o3",
+            "openai:o3-mini",
         )
     )
     DEFAULT_MODEL = models_cfg.get("default")  # may be None

@@ -146,6 +146,12 @@ You can get a list of available command line options via
 ursa serve --help
 ```
 
+For API documentation, after `ursa serve`, go to your browser at
+
+```
+http://localhost:8000/docs
+```
+
 ## Sandboxing
 The Execution Agent is allowed to run system commands and write/run code. Being able to execute arbitrary system commands or write
 and execute code has the potential to cause problems like:
@@ -231,7 +237,7 @@ ch-run -W ursa \
 
 * [`ruff`](https://docs.astral.sh/ruff/)
     * An extremely fast Python linter and code formatter, written in Rust.
-    * After installing `uv`, you can install just ruff `uv tool install ruff`
+    * After installing `uv`, you can install ruff with `uv tool install ruff`
 
 * [`just`](https://github.com/casey/just)
     * A modern way to save and run project-specific commands
