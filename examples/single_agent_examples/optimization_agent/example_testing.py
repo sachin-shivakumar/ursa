@@ -9,15 +9,15 @@ model = ChatOpenAI(
 )
 
 problem_string = """
-Here is an optimization problem with:
-objective: minimize x^2+y^2-3xy
-constraints: x+sin(y)=1
+Consider a statistical testing strategy problem. We have to test products by choosing
+the test parameter values such that, 
+a) at least 95 percent of the parameter space is covered (one-sided coverage).
+b) test parameter values are within reasonable energy limits. In other words, if x_1 to x_N are
+test parameters, the energy associated with this test is given by summation of exp(x_i) for all i. 
 
-Extract the variables, parameters, and other relevant optimization problem information.
-Write down the KKT conditions. Segregate them into dual-feasibility conditions, primal-feasibility
-conditions, and complementarity slackness. Output in a structured JSON format. 
-Additionally, write a latex file with the details in the folder:
-examples/single_agent_examples/optimization_agent/out/
+Given the N-dimensional distribution of x's, come up with the region that satisfies requirement (a).
+Moreover, provide the candidate test parameter with highest likelihood and minimum energy on the 
+boundary of this region.
 """
 
 execution_agent = OptimizationAgent(llm=model)

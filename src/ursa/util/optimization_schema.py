@@ -73,7 +73,7 @@ class SolutionSpec(TypedDict):
     dual_objective: str # value of the dual objective
     duality_gap: float # duality gap
     feasibility: str # information on solution feasibility  
-    optimality_conditions: str # sympy-representable mathematical expressions for KKT conditions or primal/dual first-order optimality conditions for the optimization problem
+    optimality_conditions: str # "Equation-only" mathematical expressions for KKT conditions or primal/dual first-order optimality conditions for the optimization problem
 
 class SolverSpec(TypedDict):
     solver: str  # name of the solver, replace with Literal["Gurobi","Ipopt",...] to restrict solvers
