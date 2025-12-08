@@ -24,8 +24,8 @@ from ..prompt_library.optimization_prompts import (
 )
 from ..tools.feasibility_tools import feasibility_check_auto as fca
 from ..tools.optimality_tools import optimality_check as oc
-from ..tools.write_code import write_python
-from ..tools.run_command import run_cmd
+from ..tools.write_code_tool import write_code
+from ..tools.run_command_tool import run_command
 from ..util.helperFunctions import extract_tool_calls, run_tool_calls
 from ..util.optimization_schema import ProblemSpec, SolverSpec, SolutionSpec
 from .base import BaseAgent
@@ -66,7 +66,7 @@ class OptimizationAgent(BaseAgent):
         self.discretizer_prompt = discretizer_prompt
         self.feasibility_prompt = feasibility_prompt
         self.optimizer_prompt = optimizer_prompt
-        self.tools = [fca, write_python, run_cmd]  # [run_cmd, write_code, search_tool, fca, oc]
+        self.tools = [fca, write_code, run_command]  # [run_cmd, write_code, search_tool, fca, oc]
         self.llm = self.llm.bind_tools(self.tools)
         self.tool_maps = {
             (getattr(t, "name", None) or getattr(t, "__name__", None)): t
