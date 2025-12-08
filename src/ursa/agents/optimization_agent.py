@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import InjectedState
 
-from ..prompt_library.optimization_prompts import (
+from ursa.prompt_library.optimization_prompts import (
     code_generator_prompt,
     discretizer_prompt,
     explainer_prompt,
@@ -22,12 +22,19 @@ from ..prompt_library.optimization_prompts import (
     verifier_prompt,
     optimizer_prompt,
 )
+<<<<<<< HEAD
 from ..tools.feasibility_tools import feasibility_check_auto as fca
 from ..tools.optimality_tools import optimality_check as oc
 from ..tools.write_code_tool import write_code
 from ..tools.run_command_tool import run_command
 from ..util.helperFunctions import extract_tool_calls, run_tool_calls
 from ..util.optimization_schema import ProblemSpec, SolverSpec, SolutionSpec
+=======
+from ursa.tools.feasibility_tools import feasibility_check_auto as fca
+from ursa.util.helperFunctions import extract_tool_calls, run_tool_calls
+from ursa.util.optimization_schema import ProblemSpec, SolverSpec
+
+>>>>>>> upstream/main
 from .base import BaseAgent
 
 # --- ANSI color codes ---
