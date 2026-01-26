@@ -22,19 +22,12 @@ from ursa.prompt_library.optimization_prompts import (
     verifier_prompt,
     optimizer_prompt,
 )
-<<<<<<< HEAD
 from ..tools.feasibility_tools import feasibility_check_auto as fca
-from ..tools.optimality_tools import optimality_check as oc
 from ..tools.write_code_tool import write_code
 from ..tools.run_command_tool import run_command
 from ..util.helperFunctions import extract_tool_calls, run_tool_calls
 from ..util.optimization_schema import ProblemSpec, SolverSpec, SolutionSpec
-=======
-from ursa.tools.feasibility_tools import feasibility_check_auto as fca
-from ursa.util.helperFunctions import extract_tool_calls, run_tool_calls
-from ursa.util.optimization_schema import ProblemSpec, SolverSpec
 
->>>>>>> upstream/main
 from .base import BaseAgent
 
 # --- ANSI color codes ---
@@ -47,13 +40,11 @@ BOLD = "\033[1m"
 
 class OptimizerState(TypedDict):
     user_input: str
-    problem: str
-    problem_spec: ProblemSpec
+    problem: ProblemSpec
     solver: SolverSpec
-    solution_spec: SolutionSpec
-    code: str
-    problem_diagnostic: list[dict]
-    summary: str
+    solution: SolutionSpec
+    notes: NotesSpec
+    data: list[list[Any]]
 
 
 class OptimizationAgent(BaseAgent):
@@ -86,76 +77,68 @@ class OptimizationAgent(BaseAgent):
     def extractor(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()
 
-        if hasattr(new_state,'problem_spec') and hasattr(new_state['problem_spec'],'notes') and hasattr(new_state["problem_spec"]["notes"],"verifier"):
-            new_state["problem"] = self.llm.invoke([
+        if hasattr(new_state,'problem') and hasattr(new_state['problem'],'status'):
+            problem = self.llm.invoke([
             SystemMessage(content=self.extractor_prompt), 
-            SystemMessage(content=new_state["problem_spec"]["notes"]["verifier"]),
+            SystemMessage(content=new_state["problem"]["status"]),
             HumanMessage(content=new_state["user_input"]),
-            ]).content    
+            ])    
         else:
-            new_state["problem"] = self.llm.invoke([
+            problem = self.llm.wiht_structured_output(ProblemSpec).invoke([
             SystemMessage(content=self.extractor_prompt), 
             HumanMessage(content=new_state["user_input"]),
-            ]).content
-        
-        new_state["problem_diagnostic"] = []
+            ])
+       
 
-        print("Extractor:\n")
-        pprint.pprint(new_state["problem"])
-        return new_state
+        notes = self.llm.with_structured_output(NotesSpec).invoke([SystemMessage(content=self.extractor_prompt), 
+            HumanMessage(content=new_state["user_input"]),
+            ])
 
-    def formulator(self, state: OptimizerState) -> OptimizerState:
-        new_state = state.copy()
+        print("Problem Extractor and Formulator:\n")
+        pprint.pprint(problem)
+        return {
+        "problem": problem,
+        "notes": notes,
+        }
 
-        llm_out = self.llm.with_structured_output(
-            ProblemSpec, include_raw=True
-        ).invoke([
-            SystemMessage(content=self.math_formulator_prompt),
-            HumanMessage(content=state["problem"]),
-        ])
-        new_state["problem_spec"] = llm_out["parsed"]
-        new_state["problem_diagnostic"].extend(
-            extract_tool_calls(llm_out["raw"])
-        )
-
-        print("Formulator:\n")
-        pprint.pprint(new_state["problem_spec"])
-        return new_state
 
     def discretizer(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()
 
-        llm_out = self.llm.with_structured_output(
-            ProblemSpec, include_raw=True
+        problem = self.llm.with_structured_output(
+            ProblemSpec
         ).invoke([
             SystemMessage(content=self.discretizer_prompt),
-            HumanMessage(content=state["problem"]),
+            HumanMessage(content=str(state["problem"])),
         ])
-        new_state["problem_spec"] = llm_out["parsed"]
-        new_state["problem_diagnostic"].extend(
-            extract_tool_calls(llm_out["raw"])
-        )
 
-        print("Discretizer:\n")
-        pprint.pprint(new_state["problem_spec"])
+        print("Discretizing Problem:\n")
+        pprint.pprint(problem)
 
-        return new_state
+        return {
+        "problem": problem
+        }
 
     def tester(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()
 
         llm_out = self.llm.bind(tool_choice="required").invoke([
             SystemMessage(content=self.feasibility_prompt),
-            HumanMessage(content=str(state["code"])),
+            HumanMessage(content=str(state["problem"])),
         ])
 
-        tool_log = run_tool_calls(llm_out, self.tool_maps)
-        new_state["problem_diagnostic"].extend(tool_log)
 
+        tool_log = run_tool_calls(llm_out, self.tool_maps)
+
+        notes["diagnostic"] = []
+        notes["diagnostic"].extend(tool_log)
+        
         print("Feasibility Tester:\n")
-        for msg in new_state["problem_diagnostic"]:
+        for msg in tool_log:
             msg.pretty_print()
-        return new_state
+        return {
+        "notes": notes
+        }
 
     def selector(self, state: OptimizerState) -> OptimizerState:
         new_state = state.copy()

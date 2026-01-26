@@ -45,16 +45,14 @@ class ConstraintType(TypedDict):
     ]  # constraint type
 
 
-class NotesType(TypedDict):
-    verifier: str  # problem verification status and explanation
-    feasibility: str  # problem feasibility status
-    user: str  # notes to user
-    assumptions: str  # assumptions made during formulation
+class NotesSpec(TypedDict):
+    description: str  # reformulation of the user input problem statement
+    latex: str # latex typesetting of the optimization problem
+    verifier: Literal["Solved",""]  # solved means stop iterating
+    verifier_explanation: str # justification of verifier status
 
 
 class ProblemSpec(TypedDict):
-    title: str  # name of the problem
-    description_nl: str  # natural language description
     decision_variables: list[
         DecisionVariableType
     ]  # list of all decision variables
@@ -62,17 +60,13 @@ class ProblemSpec(TypedDict):
     objective: ObjectiveType  # structred objective function details
     constraints: list[ConstraintType]  # structured constraint details
     problem_class: Optional[str]  # optimization problem class
-    latex: Optional[str]  # latex formulation of the problem
-    status: Literal["DRAFT", "VERIFIED", "ERROR"]  # problem status
-    notes: NotesType  # structured notes data
+    status: Literal["Feasible", "Infeasible", "Error", ""]  # problem status
 
 class SolutionSpec(TypedDict):
     primal_solution: str # list of decision variable values for the primal problem, if primal is solved
     dual_solution: str # list of decision variable values for the dual problem, if dual is solved
     primal_objective: str # value of the primal objective
     dual_objective: str # value of the dual objective
-    duality_gap: float # duality gap
-    feasibility: str # information on solution feasibility  
     optimality_conditions: str # "Equation-only" mathematical expressions for KKT conditions or primal/dual first-order optimality conditions for the optimization problem
 
 class SolverSpec(TypedDict):
