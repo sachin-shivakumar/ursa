@@ -283,13 +283,29 @@ class OptimizationAgent(BaseAgent):
             mpirun_cmd="mpirun", 
         )
 
-        inputs = {
+        if picked_potential is not None:
+            inputs = {
             "simulation_task": simulation_task,
             "elements": elements,
             "template": template if template is not None else "No template provided.",
-        }
+            "chosen_potential": picked_potential
+            }    
+        else:
+            inputs = {
+            "simulation_task": simulation_task,
+            "elements": elements,
+            "template": template if template is not None else "No template provided.",
+         }
+
+        # inputs = {
+        #     "simulation_task": simulation_task,
+        #     "elements": elements,
+        #     "template": template if template is not None else "No template provided.",
+        # }
 
         final_state = agent._invoke(inputs, recursion_limit=recursion_limit)
+
+        picked_potential = getattr(final_state,"chosen_potential")
 
 
         if final_state.get("run_returncode") == 0:
