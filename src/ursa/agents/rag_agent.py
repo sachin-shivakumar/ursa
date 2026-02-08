@@ -248,7 +248,7 @@ class RAGAgent(BaseAgent[RAGState]):
         # Persist a single file for the batch (optional)
         batch_name = "RAG_summary.txt"
         os.makedirs(self.summaries_path, exist_ok=True)
-        with open(os.path.join(self.summaries_path, batch_name), "w") as f:
+        with open(os.path.join(self.summaries_path, batch_name), "w", encoding="utf-8", errors="replace") as f:
             f.write(rag_summary)
 
         # Diagnostics
