@@ -1,10 +1,17 @@
 # optimization_agent.py (refactor: combine Formulator + ReFormulator into one node)
 import ast
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 from dataclasses import asdict  
+
+from langgraph.prebuilt import InjectedState
+from langchain.tools import ToolRuntime
+from langchain_core.runnables import RunnableConfig
+from ursa.agents.base import AgentContext
+
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -21,17 +28,17 @@ from ursa.prompt_library.optimization_prompts import (
 )
 
 
-from .base import BaseAgent
-from ..tools.feasibility_tools import feasibility_check_auto as fca
-from ..tools.write_code_tool import write_code
-from ..tools.run_command_stream_tool import (
+from ursa.agents.base import BaseAgent
+from ursa.tools.feasibility_tools import feasibility_check_auto as fca
+from ursa.tools.write_code_tool import write_code
+from ursa.tools.run_command_stream_tool import (
     run_command_stream_start,
     run_command_stream_poll,
     run_command_stream_cancel,
 )
-from ..util.helperFunctions import run_tool_calls
-from ..util.optSchema import OptimizationProblem, SolverPlan, SolverSpec, ToolIO, AttemptSummary
-from ..util.optSchema import OptimizerState, SolutionState
+from ursa.util.helperFunctions import run_tool_calls
+from ursa.util.optSchema import OptimizationProblem, SolverPlan, SolverSpec, ToolIO, AttemptSummary
+from ursa.util.optSchema import OptimizerState, SolutionState
 
 
 # -------------------- small structured LLM outputs --------------------
@@ -45,9 +52,39 @@ class StreamRouting(BaseModel):
     reason: str = ""                                 # explanation for this routing decision 
 
 class AdjustDecision(BaseModel):
-    action: Literal["retry", "reformulate", "finalize"]                 # what to do next
-    solver_options_patch: Dict[str, Any] = Field(default_factory=dict)  # patch to merge into solver.primary.options
+    action: Literal["proceed", "reformulate", "finalize"]                 # what to do next
+    solver_options_patch: Dict[str, Any] = {}  # patch to merge into solver.primary.options
     note: str = ""
+
+def _coerce_solver_plan(x: Any) -> SolverPlan:
+    if isinstance(x, SolverPlan):
+        return x
+
+    # Dict -> dataclass
+    if isinstance(x, dict):
+        p = x.get("primary") or {}
+        primary = SolverSpec(
+            name=p.get("name", "scipy"),
+            method=p.get("method"),
+            options=p.get("options") or {},
+        )
+
+        cands = []
+        for c in (x.get("candidates") or []):
+            if isinstance(c, dict):
+                cands.append(
+                    SolverSpec(
+                        name=c.get("name", "scipy"),
+                        method=c.get("method"),
+                        options=c.get("options") or {},
+                    )
+                )
+        return SolverPlan(primary=primary, candidates=cands)
+
+    # Fallback structural default
+    return SolverPlan(primary=SolverSpec(name="scipy"), candidates=[])
+
+
 
 # -------------------- robust tool-result extraction --------------------
 
@@ -90,8 +127,8 @@ def _recent_polls(state: OptimizerState, k: int = 3) -> List[Any]:
 def route_after_monitor(state: OptimizerState) -> Literal["continue", "terminate", "done"]:
     return state.problem.data.get("_stream_route", "continue")
 
-def route_after_adjust(state: OptimizerState) -> Literal["retry", "reformulate", "finalize"]:
-    return state.problem.data.get("_adjust_action") or "retry"
+def route_after_adjust(state: OptimizerState) -> Literal["proceed", "reformulate", "finalize"]:
+    return state.problem.data.get("_adjust_action") or "proceed"
 
 
 # -------------------- agent --------------------
@@ -136,6 +173,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.problem.data["_stream_log"] = []
         # used to signal whether the next formulation is a reformulation
         state.problem.data["_reformulate_requested"] = False
+
+        print("Extractor Stage Complete")
+
         return state
 
     def Formulator(self, state: OptimizerState) -> OptimizerState:
@@ -143,7 +183,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         Combined Formulator + ReFormulator:
         - If state.problem.data["_reformulate_requested"] is True, it reformulates using
           prior formulation + stream reason.
-        - Otherwise, it formulates from scratch using state.problem_user.
+        - Otherwise, it formulates from scratch using state.user_input.
 
         Side effects:
         - Resets downstream artifacts that must be regenerated (code, job_id, discretization flag).
@@ -164,10 +204,10 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             )
             log_tool = "llm_reformulate"
         else:
-            inp = state.problem_user
+            inp = state.user_input
             content = StrOutputParser().invoke(
                 self.llm.invoke(
-                    [SystemMessage(content=math_formulator_prompt), HumanMessage(content=state.problem_user)]
+                    [SystemMessage(content=math_formulator_prompt), HumanMessage(content=state.user_input)]
                 )
             )
             log_tool = "llm_formulate"
@@ -189,21 +229,27 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
         # consume the request flag so subsequent passes are "fresh" unless re-set
         state.problem.data["_reformulate_requested"] = False
+
+        print("Formulator Stage Complete")
+
         return state
 
     def Discretize(self, state: OptimizerState) -> OptimizerState:
-        dec = self.llm.with_structured_output(DiscretizeDecision).invoke(
+        dec = self.llm.with_structured_output(DiscretizeDecision, method="function_calling").invoke(
             [SystemMessage(content=discretizer_prompt), HumanMessage(content=state.problem.data["formulation"])]
         )
         state.problem.data["needs_discretization"] = dec.discretize
         if dec.note:
             state.problem.data["discretization_note"] = dec.note
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_discretize_check", inp=None, out=dec.model_dump()))
+        
+        print("Discretizer Complete")
+
         return state
 
     def Verify(self, state: OptimizerState) -> OptimizerState:
         formulation = state.problem.data["formulation"]
-        llm_out = self.llm_tools.bind(tool_choice=self._toolname_fca).invoke(
+        llm_out = self.llm_tools.bind(tool_choice={"type": "function", "function": {"name": self._toolname_fca}}).invoke(
             [
                 SystemMessage(content=feasibility_prompt),
                 HumanMessage(content=formulation),
@@ -212,6 +258,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         tool_msgs = run_tool_calls(llm_out, self.tool_maps)
         payload = _last_tool_payload(tool_msgs)
         state.diagnostics.tool_calls.append(ToolIO(tool="feasibility_check", inp=None, out=payload))
+
+        print("Verifier Complete")
+
         return state
 
     def select_solver(self, state: OptimizerState) -> OptimizerState:
@@ -224,7 +273,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             ),
         }
 
-        llm_out = self.llm.with_structured_output(SolverPlan, include_raw=True).invoke(
+        llm_out = self.llm.with_structured_output(SolverPlan, method="function_calling", include_raw=True).invoke(
             [
                 SystemMessage(content=solver_selector_prompt),
                 HumanMessage(content=str(payload)),
@@ -233,10 +282,12 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
         plan = llm_out["parsed"]  # SolverPlan (dataclass) if supported
 
-        state.solver = plan
+        state.solver = _coerce_solver_plan(plan)
         state.diagnostics.tool_calls.append(
             ToolIO(tool="llm_select_solver", inp=payload, out={"plan": plan, "raw": llm_out.get("raw")})
         )
+
+        print("Solver Selected")
         return state
 
     def configure_solver(self, state: OptimizerState) -> OptimizerState:
@@ -276,7 +327,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
         if mode == "configure":
             # Initial config: no branching decision needed; just patch options.
-            options_patch = self.llm.with_structured_output(Dict[str, Any]).invoke(
+            options_patch = self.llm.invoke(
                 [
                     SystemMessage(
                         content=optimizer_prompt
@@ -287,6 +338,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
                 ]
             )
 
+            options_patch = _parse_maybe_json(options_patch.content)
+
             if isinstance(options_patch, dict):
                 state.solver.primary.options.update(options_patch)
 
@@ -294,17 +347,20 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
                 ToolIO(tool="llm_configure_solver", inp=payload, out=options_patch)
             )
 
-            state.problem.data["_adjust_action"] = "retry"
+            state.problem.data["_adjust_action"] = "proceed"
+
+            print("Configured Solver")
+
             return state
 
         # Adjust mode: decide what to do next AND optionally patch options.
-        decision = self.llm.with_structured_output(AdjustDecision).invoke(
+        decision = self.llm.with_structured_output(AdjustDecision, method="function_calling").invoke(
             [
                 SystemMessage(
                     content=optimizer_prompt
                     + "\n\nYou are monitoring/adjusting a running solve that was terminated. "
-                      "Choose action in {retry, reformulate, finalize}. "
-                      "If retry, include solver_options_patch to improve performance; otherwise leave empty."
+                      "Choose action in {proceed, reformulate, finalize}. "
+                      "If proceed, include solver_options_patch to improve performance; otherwise leave empty."
                 ),
                 HumanMessage(content=str(payload)),
             ]
@@ -318,6 +374,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
         if decision.action == "reformulate":
             state.problem.data["_reformulate_requested"] = True
+
+        print("Reconfigured solver")
 
         return state
 
@@ -346,98 +404,96 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.problem.data["solve_py"] = code
         state.problem.data.setdefault("solve_filename", "solve.py")
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_codegen", inp=None, out={"chars": len(code)}))
+
+        print("Code Generated")
+
         return state
 
-    def codewrite(self, state: OptimizerState) -> OptimizerState:
+
+    def codewrite(
+        self,
+        state: OptimizerState,
+        runtime: ToolRuntime[AgentContext] = InjectedState("runtime"),
+    ) -> OptimizerState:
         code = state.problem.data["solve_py"]
         filename = state.problem.data.get("solve_filename", "solve.py")
-        llm_out = self.llm_tools.bind(tool_choice=self._toolname_write).invoke(
-            [
-                SystemMessage(content="Write the code to the file using write_code."),
-                HumanMessage(content=str({"code": code, "filename": filename})),
-            ]
-        )
-        tool_msgs = run_tool_calls(llm_out, self.tool_maps)
-        payload = _last_tool_payload(tool_msgs)
+
+        cfg = RunnableConfig(configurable={"runtime": runtime})
+
+        out = write_code.invoke({"code": code, "filename": filename, "runtime": runtime}, config=cfg)
+
         state.diagnostics.tool_calls.append(
-            ToolIO(tool="write_code", inp={"filename": filename, "chars": len(code)}, out=payload)
+            ToolIO(tool="write_code", inp={"filename": filename, "chars": len(code)}, out=out)
         )
+
         state.problem.data["solve_cmd"] = f"python {filename}"
         return state
 
-    def start_solve(self, state: OptimizerState) -> OptimizerState:
+    def start_solve(
+        self,
+        state: OptimizerState,
+        runtime: ToolRuntime[AgentContext] = InjectedState("runtime"),
+    ) -> OptimizerState:
         if state.problem.data.get("_job_id"):
             return state
 
         cmd = state.problem.data["solve_cmd"]
-        llm_out = self.llm_tools.bind(tool_choice=self._toolname_start).invoke(
-            [
-                SystemMessage(content="Start the command using the streaming start tool."),
-                HumanMessage(content=cmd),
-            ]
-        )
-        tool_msgs = run_tool_calls(llm_out, self.tool_maps)
-        payload = _last_tool_payload(tool_msgs)
-        state.diagnostics.tool_calls.append(ToolIO(tool="solve_start", inp={"cmd": cmd}, out=payload))
+        cfg = RunnableConfig(configurable={"runtime": runtime})
 
-        if isinstance(payload, dict) and payload.get("ok") and payload.get("job_id"):
-            state.problem.data["_job_id"] = payload["job_id"]
+        out = run_command_stream_start.invoke({"query": cmd, "runtime": runtime}, config=cfg)
+
+        state.diagnostics.tool_calls.append(ToolIO(tool="solve_start", inp={"cmd": cmd}, out=out))
+
+        if isinstance(out, dict) and out.get("ok") and out.get("job_id"):
+            state.problem.data["_job_id"] = out["job_id"]
             state.solution.status = "solving"
             state.problem.data["_stream_route"] = "continue"
         else:
             state.solution.status = "error"
             state.problem.data["_stream_route"] = "done"
+            state.problem.data["_stream_reason"] = out.get("error") if isinstance(out, dict) else "start failed"
+
         return state
 
-    def monitor_solve(self, state: OptimizerState) -> OptimizerState:
+    def monitor_solve(
+        self,
+        state: OptimizerState,
+        runtime: ToolRuntime[AgentContext] = InjectedState("runtime"),
+    ) -> OptimizerState:
         job_id = state.problem.data.get("_job_id")
         if not job_id:
             state.problem.data["_stream_route"] = "terminate"
             state.problem.data["_stream_reason"] = "Missing job_id"
             return state
 
-        llm_out = self.llm_tools.bind(tool_choice=self._toolname_poll).invoke(
-            [
-                SystemMessage(content="Poll the streaming job for new output."),
-                HumanMessage(content=str(job_id)),
-            ]
-        )
-        tool_msgs = run_tool_calls(llm_out, self.tool_maps)
-        poll = _last_tool_payload(tool_msgs)
+        cfg = RunnableConfig(configurable={"runtime": runtime})
+
+        poll = run_command_stream_poll.invoke({"job_id": str(job_id), "runtime": runtime}, config=cfg)
+
+        state.diagnostics.tool_calls.append(ToolIO(tool="solve_poll", inp={"job_id": job_id}, out=poll))
 
         lines = poll.get("lines") if isinstance(poll, dict) else None
         if isinstance(lines, list) and lines:
             state.problem.data.setdefault("_stream_log", []).extend(lines)
 
-        if len(state.problem.data.get("_stream_log",{}))>1000:
-            state.problem.data["_stream_log"] = state.problem.data["_stream_log"][:-1000] 
-
-        state.diagnostics.tool_calls.append(ToolIO(tool="solve_poll", inp={"job_id": job_id}, out=poll))
+        log = state.problem.data.get("_stream_log")
+        if isinstance(log, list) and len(log) > 1000:
+            state.problem.data["_stream_log"] = log[-1000:]
 
         if not isinstance(poll, dict) or not poll.get("ok"):
             state.problem.data["_stream_route"] = "terminate"
-            state.problem.data["_stream_reason"] = (poll.get("error") if isinstance(poll, dict) else "poll failed")
+            state.problem.data["_stream_reason"] = poll.get("error") if isinstance(poll, dict) else "poll failed"
             return state
 
         if poll.get("done"):
             state.problem.data["_stream_route"] = "done"
             return state
 
-        route = self.llm.with_structured_output(StreamRouting).invoke(
+        # route decision (keep your existing logic)
+        route = self.llm.with_structured_output(StreamRouting, method="function_calling").invoke(
             [
                 SystemMessage(content=verifier_prompt),
-                HumanMessage(
-                    content=str(
-                        {
-                            "solver": {
-                                "name": state.solver.primary.name,
-                                "method": state.solver.primary.method,
-                                "options": state.solver.primary.options,
-                            },
-                            "recent_stream": _recent_polls(state, k=3),
-                        }
-                    )
-                ),
+                HumanMessage(content=str({"recent_stream": _recent_polls(state, k=3)})),
             ]
         )
         state.problem.data["_stream_route"] = route.route
@@ -445,21 +501,22 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_stream_router", inp=None, out=route.model_dump()))
         return state
 
-    def cancel_solve(self, state: OptimizerState) -> OptimizerState:
+
+    def cancel_solve(
+        self,
+        state: OptimizerState,
+        runtime: ToolRuntime[AgentContext] = InjectedState("runtime"),
+    ) -> OptimizerState:
         job_id = state.problem.data.get("_job_id")
         if not job_id:
             return state
 
-        llm_out = self.llm_tools.bind(tool_choice=self._toolname_cancel).invoke(
-            [
-                SystemMessage(content="Cancel the streaming job."),
-                HumanMessage(content=str(job_id)),
-            ]
-        )
-        tool_msgs = run_tool_calls(llm_out, self.tool_maps)
-        payload = _last_tool_payload(tool_msgs)
+        cfg = RunnableConfig(configurable={"runtime": runtime})
 
-        state.diagnostics.tool_calls.append(ToolIO(tool="solve_cancel", inp={"job_id": job_id}, out=payload))
+        out = run_command_stream_cancel.invoke({"job_id": str(job_id), "runtime": runtime}, config=cfg)
+
+        state.diagnostics.tool_calls.append(ToolIO(tool="solve_cancel", inp={"job_id": job_id}, out=out))
+
         state.problem.data["_job_id"] = None
         return state
 
@@ -487,13 +544,15 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
         # Ask LLM to output a SolutionState-like object.
         # NOTE: This works only if your LangChain version supports dataclasses here.
-        llm_out = self.llm.with_structured_output(SolutionState, include_raw=True).invoke(
+        llm_out = self.llm.with_structured_output(SolutionState, method="function_calling", include_raw=True).invoke(
             [
                 SystemMessage(content=verifier_prompt),
                 HumanMessage(content=str(payload)),
             ]
         )
         sol = llm_out["parsed"]  # expected SolutionState
+
+        print(sol)
 
         # write back into the canonical state.solution
         state.solution.status = sol.status
@@ -519,59 +578,129 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         )
 
         state.status = state.solution.status
+
+        print("Exiting Summarizer")
+
         return state
 
 
     # -------- Graph --------
 
-    def build_graph(self):
-        g = StateGraph(OptimizerState)
+    def _build_graph(self):
+        # g = StateGraph(OptimizerState)
 
-        g.add_node("Extractor", self.Extractor)
-        g.add_node("Formulator", self.Formulator)
+        self.add_node(self.Extractor,"Extractor")
+        self.add_node(self.Formulator,"Formulator")
 
-        g.add_node("Discretize", self.Discretize)
-        g.add_node("Verify", self.Verify)
+        self.add_node(self.Discretize, "Discretize")
+        self.add_node(self.Verify, "Verify")
 
-        g.add_node("select_solver", self.select_solver)
-        g.add_node("configure_solver", self.configure_solver)
+        self.add_node(self.select_solver, "select_solver")
+        self.add_node(self.configure_solver, "configure_solver")
 
-        g.add_node("codegen", self.codegen)
-        g.add_node("codewrite", self.codewrite)
+        self.add_node(self.codegen, "codegen")
+        self.add_node(self.codewrite, "codewrite")
 
-        g.add_node("start_solve", self.start_solve)
-        g.add_node("monitor_solve", self.monitor_solve)
-        g.add_node("cancel_solve", self.cancel_solve)
+        self.add_node(self.start_solve, "start_solve")
+        self.add_node(self.monitor_solve, "monitor_solve")
+        self.add_node(self.cancel_solve, "cancel_solve")
 
-        g.add_node("finalize", self.finalize)
+        self.add_node(self.finalize, "finalize")
 
-        g.add_edge(START, "Extractor")
-        g.add_edge("Extractor", "Formulator")
+        self.graph.add_edge(START, "Extractor")
+        self.graph.add_edge("Extractor", "Formulator")
 
-        g.add_edge("Formulator", "Discretize")
-        g.add_edge("Discretize", "Verify")
+        self.graph.add_edge("Formulator", "Discretize")
+        self.graph.add_edge("Discretize", "Verify")
 
-        g.add_edge("Verify", "select_solver")
-        g.add_edge("select_solver", "configure_solver")
+        self.graph.add_edge("Verify", "select_solver")
+        self.graph.add_edge("select_solver", "configure_solver")
 
-        g.add_edge("codegen", "codewrite")
+        self.graph.add_edge("codegen", "codewrite")
 
-        g.add_edge("codewrite", "start_solve")
-        g.add_edge("start_solve", "monitor_solve")
+        self.graph.add_edge("codewrite", "start_solve")
+        self.graph.add_edge("start_solve", "monitor_solve")
 
-        g.add_conditional_edges(
+        self.graph.add_conditional_edges(
             "monitor_solve",
             route_after_monitor,
             {"continue": "monitor_solve", "terminate": "cancel_solve", "done": "finalize"},
         )
 
-        g.add_edge("cancel_solve", "configure_solver")
-        g.add_conditional_edges(
+        self.graph.add_edge("cancel_solve", "configure_solver")
+        self.graph.add_conditional_edges(
             "configure_solver",
             route_after_adjust,
-            {"retry": "codegen", "reformulate": "Formulator", "finalize": "finalize"},
+            {"proceed": "codegen", "reformulate": "Formulator", "terminate": "finalize"},
         )
 
-        g.add_edge("finalize", END)
+        self.graph.add_edge("finalize", END)
 
-        return g.compile()
+                # --- graph plot (optional debug artifact) ---
+        try:
+            import os
+            
+            compiled = self.graph.compile()
+
+            # 1) Mermaid source
+            mermaid = compiled.get_graph().draw_mermaid()
+            state_path = getattr(self, "context", None) and getattr(self.context, "workspace", None)
+            out_dir = "ursa_workspace"
+
+            os.makedirs(out_dir, exist_ok=True)
+
+            mmd_path = f"{out_dir}/optimization_graph.mmd"
+            with open(mmd_path, "w", encoding="utf-8") as f:
+                f.write(mermaid)
+
+            # 2) PNG (requires Mermaid rendering support in environment)
+            if True:
+                png_bytes = compiled.get_graph().draw_mermaid_png()
+                png_path = f"{out_dir}/optimization_graph.png"
+                with open(png_path, "wb") as f:
+                    f.write(png_bytes)
+            else:
+                pass
+        except Exception:
+            # If rendering fails, still return a working graph
+            pass
+
+
+if __name__=="__main__":
+    from langchain_openai import ChatOpenAI
+    from langchain_core.runnables import RunnableConfig
+    
+    problem_string = """
+    Solve this optimization problem:
+
+    Decision variables: x, y (continuous)
+
+    Objective: minimize (x - 1)^2 + (y + 2)^2
+
+    Constraints:
+    - x + y = 1
+    - x >= 0
+    - y >= 0
+
+    Notes:
+    - Please print progress during solving.
+    - At the end print a line containing one of: OPTIMAL, FEASIBLE, INFEASIBLE, UNBOUNDED, ERROR.
+    - Also print variable assignments as simple lines like "x=..." and "y=..." and objective like "obj=...".
+    """
+
+    llm = ChatOpenAI(model="gpt-5.2", max_tokens=10000, timeout=None, max_retries=2)
+    agent = OptimizationAgent(llm=llm)
+
+    ws = Path.cwd() / "ursa_workspace"
+    ws.mkdir(parents=True, exist_ok=True)
+    cfg = RunnableConfig(configurable={"workspace": str(ws)})
+    result = agent.invoke({"user_input": problem_string}, config=cfg)
+
+    print("\n=== FINAL STATE ===")
+    print("status:", result.status)
+    print("solution.status:", result.solution.status)
+    print("solution.obj:", result.solution.obj)
+    print("solution.x:", result.solution.x)
+    print("history:", [h.__dict__ for h in result.solution.history])
+
+ 

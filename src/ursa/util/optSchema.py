@@ -90,7 +90,7 @@ class Diagnostics:
 
 @dataclass
 class OptimizerState:
-    problem_user: str                                    # raw user problem statement (LLM input)
+    user_input: str                                    # raw user problem statement (LLM input)
     status: Status = "init"                              # overall run status
     problem: OptimizationProblem = field(default_factory=OptimizationProblem)  # canonical problem
     solver: SolverPlan = field(default_factory=lambda: SolverPlan(primary=SolverSpec(name="scipy")))  # solver plan
