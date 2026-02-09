@@ -238,7 +238,7 @@ class BaseAgent(Generic[TState], ABC):
             state: Dictionary containing the agent state to be serialized.
         """
         json_state = dumps(state, ensure_ascii=False)
-        with open(filename, "w") as f:
+        with open(filename, "w",  encoding="utf-8", errors="replace") as f:
             f.write(json_state)
 
     def build_config(self, **overrides) -> dict:

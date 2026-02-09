@@ -1,11 +1,22 @@
 # optimization_agent.py (refactor: combine Formulator + ReFormulator into one node)
-import ast
+import ast, pprint
 import json
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Dict, List, Literal
+from datetime import datetime
+
+import warnings
+from pydantic.json_schema import PydanticJsonSchemaWarning
+
+warnings.filterwarnings(
+    "ignore",
+    category=PydanticJsonSchemaWarning,
+    message=r"Default value <factory> is not JSON serializable; excluding default from JSON schema",
+)
 
 from pydantic import BaseModel, Field
-from dataclasses import asdict  
+from dataclasses import asdict, is_dataclass 
 
 from langgraph.prebuilt import InjectedState
 from langchain.tools import ToolRuntime
@@ -52,7 +63,7 @@ class StreamRouting(BaseModel):
     reason: str = ""                                 # explanation for this routing decision 
 
 class AdjustDecision(BaseModel):
-    action: Literal["proceed", "reformulate", "finalize"]                 # what to do next
+    action: Literal["proceed", "reformulate", "terminate"]                 # what to do next
     solver_options_patch: Dict[str, Any] = {}  # patch to merge into solver.primary.options
     note: str = ""
 
@@ -84,6 +95,16 @@ def _coerce_solver_plan(x: Any) -> SolverPlan:
     # Fallback structural default
     return SolverPlan(primary=SolverSpec(name="scipy"), candidates=[])
 
+
+
+def _audit(state: OptimizerState, event: str, **fields):
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        **fields,
+    }
+    pprint.pprint(rec)
+    state.problem.data.setdefault("_audit", []).append(rec)
 
 
 # -------------------- robust tool-result extraction --------------------
@@ -121,13 +142,21 @@ def _recent_polls(state: OptimizerState, k: int = 3) -> List[Any]:
                 break
     return list(reversed(out))
 
-
+def _as_tool_runtime(runtime):
+    return ToolRuntime(
+        context=runtime.context,
+        store=getattr(runtime, "store", None),
+        stream_writer=getattr(runtime, "stream_writer", None),
+        state=getattr(runtime, "state", {}) or {},   # your runtime likely has no .state; make it empty
+        tool_call_id=uuid4().hex,                   # required by ToolRuntime schema in your version
+        config=getattr(runtime, "config", {}) or {},
+    )
 # -------------------- graph routers --------------------
 
 def route_after_monitor(state: OptimizerState) -> Literal["continue", "terminate", "done"]:
     return state.problem.data.get("_stream_route", "continue")
 
-def route_after_adjust(state: OptimizerState) -> Literal["proceed", "reformulate", "finalize"]:
+def route_after_adjust(state: OptimizerState) -> Literal["proceed", "reformulate", "terminate"]:
     return state.problem.data.get("_adjust_action") or "proceed"
 
 
@@ -171,6 +200,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.problem.data["_stream_reason"] = None
         state.problem.data["_adjust_action"] = None
         state.problem.data["_stream_log"] = []
+        state.problem.data["_audit"] = []   # chronological audit trail
         # used to signal whether the next formulation is a reformulation
         state.problem.data["_reformulate_requested"] = False
 
@@ -359,12 +389,14 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
                 SystemMessage(
                     content=optimizer_prompt
                     + "\n\nYou are monitoring/adjusting a running solve that was terminated. "
-                      "Choose action in {proceed, reformulate, finalize}. "
+                      "Choose action in {proceed, reformulate, terminate}. "
                       "If proceed, include solver_options_patch to improve performance; otherwise leave empty."
                 ),
                 HumanMessage(content=str(payload)),
             ]
         )
+        _audit(state, "adjust_decision", action=decision.action, note=decision.note, patch=decision.solver_options_patch)
+
 
         if decision.solver_options_patch:
             state.solver.primary.options.update(decision.solver_options_patch)
@@ -373,6 +405,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_adjust", inp=payload, out=decision.model_dump()))
 
         if decision.action == "reformulate":
+            _audit(state, "reformulate_requested", reason=state.problem.data.get("_stream_reason"))
             state.problem.data["_reformulate_requested"] = True
 
         print("Reconfigured solver")
@@ -418,15 +451,16 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         code = state.problem.data["solve_py"]
         filename = state.problem.data.get("solve_filename", "solve.py")
 
-        cfg = RunnableConfig(configurable={"runtime": runtime})
-
-        out = write_code.invoke({"code": code, "filename": filename, "runtime": runtime}, config=cfg)
+        out = write_code.invoke({"code": code, "filename": filename, "runtime": _as_tool_runtime(runtime)})
 
         state.diagnostics.tool_calls.append(
             ToolIO(tool="write_code", inp={"filename": filename, "chars": len(code)}, out=out)
         )
 
         state.problem.data["solve_cmd"] = f"python {filename}"
+
+        print("Code Written")
+
         return state
 
     def start_solve(
@@ -438,9 +472,10 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             return state
 
         cmd = state.problem.data["solve_cmd"]
-        cfg = RunnableConfig(configurable={"runtime": runtime})
 
-        out = run_command_stream_start.invoke({"query": cmd, "runtime": runtime}, config=cfg)
+        out = run_command_stream_start.invoke({"query": cmd, "runtime": _as_tool_runtime(runtime)})
+
+        _audit(state, "solve_start", cmd=cmd, out=out)
 
         state.diagnostics.tool_calls.append(ToolIO(tool="solve_start", inp={"cmd": cmd}, out=out))
 
@@ -450,8 +485,11 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             state.problem.data["_stream_route"] = "continue"
         else:
             state.solution.status = "error"
-            state.problem.data["_stream_route"] = "done"
+            state.problem.data["_stream_route"] = "terminate"
             state.problem.data["_stream_reason"] = out.get("error") if isinstance(out, dict) else "start failed"
+            _audit(state, "solve_start_failed", reason=state.problem.data.get("_stream_reason"))
+
+        print("Starting Solve")
 
         return state
 
@@ -466,11 +504,11 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             state.problem.data["_stream_reason"] = "Missing job_id"
             return state
 
-        cfg = RunnableConfig(configurable={"runtime": runtime})
-
-        poll = run_command_stream_poll.invoke({"job_id": str(job_id), "runtime": runtime}, config=cfg)
+        poll = run_command_stream_poll.invoke({"job_id": str(job_id), "runtime": _as_tool_runtime(runtime)})
 
         state.diagnostics.tool_calls.append(ToolIO(tool="solve_poll", inp={"job_id": job_id}, out=poll))
+
+
 
         lines = poll.get("lines") if isinstance(poll, dict) else None
         if isinstance(lines, list) and lines:
@@ -479,14 +517,28 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         log = state.problem.data.get("_stream_log")
         if isinstance(log, list) and len(log) > 1000:
             state.problem.data["_stream_log"] = log[-1000:]
+        
+        _audit(state, "solve_poll", job_id=str(job_id), done=poll.get("done"), returncode=poll.get("returncode"), n_lines=len(lines or []))
 
         if not isinstance(poll, dict) or not poll.get("ok"):
             state.problem.data["_stream_route"] = "terminate"
             state.problem.data["_stream_reason"] = poll.get("error") if isinstance(poll, dict) else "poll failed"
+            _audit(state, "solve_poll_failed", reason=state.problem.data.get("_stream_reason"))
             return state
 
         if poll.get("done"):
-            state.problem.data["_stream_route"] = "done"
+            tail = "".join(state.problem.data.get("_stream_log", [])[-50:]).upper()
+            rc = poll.get("returncode")
+
+            # If the run ended in ERROR, treat it as "terminate" so we go to cancel_solve -> configure_solver
+            if "ERROR" in tail or (rc not in (None, 0)):
+                state.solution.status = "error"  # <--- add this
+                state.problem.data["_stream_route"] = "terminate"
+                state.problem.data["_stream_reason"] = f"Solver run failed (returncode={rc})"
+                _audit(state, "solve_done_error", reason=state.problem.data.get("_stream_reason"))
+            else:
+                state.problem.data["_stream_route"] = "done"
+                _audit(state, "solve_done_ok")
             return state
 
         # route decision (keep your existing logic)
@@ -499,6 +551,10 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.problem.data["_stream_route"] = route.route
         state.problem.data["_stream_reason"] = route.reason
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_stream_router", inp=None, out=route.model_dump()))
+        _audit(state, "route_stream", route=route.route, reason=route.reason)
+
+        print("Monitored Run: Deciding next steps")
+
         return state
 
 
@@ -511,13 +567,16 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         if not job_id:
             return state
 
-        cfg = RunnableConfig(configurable={"runtime": runtime})
-
-        out = run_command_stream_cancel.invoke({"job_id": str(job_id), "runtime": runtime}, config=cfg)
+        out = run_command_stream_cancel.invoke({"job_id": str(job_id), "runtime": _as_tool_runtime(runtime)})
 
         state.diagnostics.tool_calls.append(ToolIO(tool="solve_cancel", inp={"job_id": job_id}, out=out))
 
+        _audit(state, "solve_cancel", job_id=str(job_id), out=out)
         state.problem.data["_job_id"] = None
+
+
+        print("Solve Cancelled: Going back to configure_solve")
+
         return state
 
 
@@ -552,12 +611,10 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         )
         sol = llm_out["parsed"]  # expected SolutionState
 
-        print(sol)
-
         # write back into the canonical state.solution
-        state.solution.status = sol.status
-        state.solution.x = sol.x
-        state.solution.obj = sol.obj
+        state.solution.status = sol["status"]
+        state.solution.x = sol["x"]
+        state.solution.obj = sol["obj"]
 
         # append attempt summary (agent-owned)
         solver_tag = state.solver.primary.name
@@ -573,11 +630,12 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             ToolIO(
                 tool="llm_finalize",
                 inp={"tail_len": len(tail)},
-                out={"parsed_solution": asdict(sol), "raw": str(llm_out.get("raw"))[:2000]},
+                out={"parsed_solution": sol, "raw": str(llm_out.get("raw"))[:2000]},
             )
         )
 
         state.status = state.solution.status
+        _audit(state, "finalize", parsed=sol, tail_len=len(tail))
 
         print("Exiting Summarizer")
 
@@ -696,11 +754,22 @@ if __name__=="__main__":
     cfg = RunnableConfig(configurable={"workspace": str(ws)})
     result = agent.invoke({"user_input": problem_string}, config=cfg)
 
+
+    # Convert final state to JSON-serializable dict
+    final_state = asdict(result) if is_dataclass(result) else dict(result)
+
+    # Write to workspace (BaseAgent already has write_state)
+    out_path = agent.workspace / "final_state.json"
+    agent.write_state(str(out_path), final_state)
+
     print("\n=== FINAL STATE ===")
-    print("status:", result.status)
-    print("solution.status:", result.solution.status)
-    print("solution.obj:", result.solution.obj)
-    print("solution.x:", result.solution.x)
-    print("history:", [h.__dict__ for h in result.solution.history])
+    print("status:", result["status"])
+    print("solution.status:", result["solution"].status)
+    print("solution.obj:", result["solution"].obj)
+    print("solution.x:", result["solution"].x)
+    print("history:", [h.__dict__ for h in result["solution"].history])
 
  
+    print("\n=== AUDIT TRAIL ===")
+    for e in final_state["problem"]["data"].get("_audit", []):
+        print(f'{e["ts"]}  {e["event"]}  { {k:v for k,v in e.items() if k not in ("ts","event")} }')
