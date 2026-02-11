@@ -70,7 +70,7 @@ class AttemptSummary:
 @dataclass
 class SolutionState:
     status: Status = "init"                              # current solution status
-    x: Optional[Dict[str, Any]] = None                   # variable assignment keyed by Variable.name (LLM-friendly JSON)
+    x: Optional[Dict[str, Any] | List[float]] = None                   # current value of the solution from the solver (LLM-friendly JSON)
     obj: Optional[float] = None                          # objective value at x (if available)
     history: List[AttemptSummary] = field(default_factory=list)  # attempt log (optional)
 

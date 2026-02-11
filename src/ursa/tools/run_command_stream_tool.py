@@ -101,7 +101,12 @@ def run_command_stream_poll(job_id: AsciiStr, runtime: ToolRuntime[AgentContext]
     lines: List[str] = []
     for _ in range(200):
         try:
-            lines.append(q.get_nowait())
+            line = q.get_nowait()
+            lines.append(line)
+
+            # Print only NEW lines (queue guarantees they are new)
+            print(f"[{job_id}] {line}", end="" if line.endswith("\n") else "\n", flush=True)
+
         except queue.Empty:
             break
 

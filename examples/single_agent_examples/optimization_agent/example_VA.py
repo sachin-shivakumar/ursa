@@ -11,6 +11,12 @@ Start with a two-stream beam configuration and add some perturbation. There is a
 field control trying to suppress the instability. Using optimization formulation to find 
 the minimum energy control that stabilizes the two-stream instability.
 
+Make sure to use sufficient resolution for discretization to capture the instabilities. 
+At least 32 in x space, 256 in v space. 
+
+Additionally, use numerically stable and accurate discretization schemes, such as upwind. 
+Simulate over time horizon of 30 seconds and use appropriate CFL bounds to determine time step size.
+
 Notes:
 - Please print progress during solving.
 - At the end print a line containing one of: OPTIMAL, FEASIBLE, INFEASIBLE, UNBOUNDED, ERROR.

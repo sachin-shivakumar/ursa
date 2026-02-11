@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Dict, List, Literal
 from datetime import datetime
+import time
 
 import warnings
 from pydantic.json_schema import PydanticJsonSchemaWarning
@@ -103,7 +104,7 @@ def _audit(state: OptimizerState, event: str, **fields):
         "event": event,
         **fields,
     }
-    pprint.pprint(rec)
+    # pprint.pprint(rec)
     state.problem.data.setdefault("_audit", []).append(rec)
 
 
@@ -134,9 +135,10 @@ def _last_tool_payload(tool_msgs: List[Any]) -> Any:
     return _parse_maybe_json(content)
 
 def _recent_polls(state: OptimizerState, k: int = 3) -> List[Any]:
-    out: List[Any] = []
+    att = int(state.problem.data.get("_attempt", 0))
+    out = []
     for tc in reversed(state.diagnostics.tool_calls):
-        if tc.tool == "solve_poll":
+        if tc.tool == "solve_poll" and (tc.inp or {}).get("attempt") == att:
             out.append(tc.out)
             if len(out) >= k:
                 break
@@ -201,6 +203,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.problem.data["_adjust_action"] = None
         state.problem.data["_stream_log"] = []
         state.problem.data["_audit"] = []   # chronological audit trail
+        state.problem.data["_solve_start_t"] = None
+        state.problem.data["_last_output_t"] = None
+        state.problem.data["_attempt"] = 0
         # used to signal whether the next formulation is a reformulation
         state.problem.data["_reformulate_requested"] = False
 
@@ -229,7 +234,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             inp = user_msg
             content = StrOutputParser().invoke(
                 self.llm.invoke(
-                    [SystemMessage(content=math_formulator_prompt), HumanMessage(content=str(user_msg))]
+                    [SystemMessage(content=math_formulator_prompt), 
+                     HumanMessage(content=str(user_msg)),
+                     HumanMessage(content=str(state.user_input))]
                 )
             )
             log_tool = "llm_reformulate"
@@ -237,7 +244,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             inp = state.user_input
             content = StrOutputParser().invoke(
                 self.llm.invoke(
-                    [SystemMessage(content=math_formulator_prompt), HumanMessage(content=state.user_input)]
+                    [SystemMessage(content=math_formulator_prompt), 
+                     HumanMessage(content=state.user_input)]
                 )
             )
             log_tool = "llm_formulate"
@@ -266,7 +274,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
     def Discretize(self, state: OptimizerState) -> OptimizerState:
         dec = self.llm.with_structured_output(DiscretizeDecision, method="function_calling").invoke(
-            [SystemMessage(content=discretizer_prompt), HumanMessage(content=state.problem.data["formulation"])]
+            [SystemMessage(content=discretizer_prompt), 
+            HumanMessage(content=state.problem.data["formulation"])]
         )
         state.problem.data["needs_discretization"] = dec.discretize
         if dec.note:
@@ -329,8 +338,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
           - If absent/None: "initial configure" mode.
           - If present (set by adjust flow): "adjust" mode.
         """
-        mode = "adjust" if state.problem.data.get("_stream_route") == "terminate" else "configure"
-
+        mode = "configure" if state.problem.data.get("_attempt", 0) == 0 else "adjust"
+        
         payload = {
             "mode": mode,  # "configure" or "adjust"
             "solver": {
@@ -372,6 +381,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
             if isinstance(options_patch, dict):
                 state.solver.primary.options.update(options_patch)
+
 
             state.diagnostics.tool_calls.append(
                 ToolIO(tool="llm_configure_solver", inp=payload, out=options_patch)
@@ -419,7 +429,7 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
                 [
                     SystemMessage(content=code_generator_prompt),
                     HumanMessage(
-                        content=str(
+                        content=str(state.user_input)+str(
                             {
                                 "formulation": state.problem.data["formulation"],
                                 "solver": state.solver.primary,
@@ -434,8 +444,11 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
                 ]
             )
         )
+
+        att = int(state.problem.data.get("_attempt", 0)) + 1
+        state.problem.data["_attempt"] = att
+        state.problem.data["solve_filename"] = f"solve_attempt_{att}.py"
         state.problem.data["solve_py"] = code
-        state.problem.data.setdefault("solve_filename", "solve.py")
         state.diagnostics.tool_calls.append(ToolIO(tool="llm_codegen", inp=None, out={"chars": len(code)}))
 
         print("Code Generated")
@@ -457,7 +470,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             ToolIO(tool="write_code", inp={"filename": filename, "chars": len(code)}, out=out)
         )
 
-        state.problem.data["solve_cmd"] = f"python {filename}"
+
+        state.problem.data["solve_cmd"] = f'python -u "{filename}"'
 
         print("Code Written")
 
@@ -476,6 +490,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         out = run_command_stream_start.invoke({"query": cmd, "runtime": _as_tool_runtime(runtime)})
 
         _audit(state, "solve_start", cmd=cmd, out=out)
+        state.problem.data["_solve_start_t"] = time.time()
+        state.problem.data["_last_output_t"] = time.time()
 
         state.diagnostics.tool_calls.append(ToolIO(tool="solve_start", inp={"cmd": cmd}, out=out))
 
@@ -509,16 +525,44 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
         state.diagnostics.tool_calls.append(ToolIO(tool="solve_poll", inp={"job_id": job_id}, out=poll))
 
 
-
         lines = poll.get("lines") if isinstance(poll, dict) else None
         if isinstance(lines, list) and lines:
             state.problem.data.setdefault("_stream_log", []).extend(lines)
+            state.problem.data["_last_output_t"] = time.time()
 
         log = state.problem.data.get("_stream_log")
-        if isinstance(log, list) and len(log) > 1000:
-            state.problem.data["_stream_log"] = log[-1000:]
+        if isinstance(log, list) and len(log) > 2000:
+            state.problem.data["_stream_log"] = log[-2000:]
         
-        _audit(state, "solve_poll", job_id=str(job_id), done=poll.get("done"), returncode=poll.get("returncode"), n_lines=len(lines or []))
+        _audit(state, "solve_poll", job_id=str(job_id), done=poll.get("done"), returncode=poll.get("returncode"), n_lines=len(lines or []))        
+
+        # --- deterministic timeouts ---
+        MAX_WALL_SEC = 3000       # total allowed solve time (e.g., 5 minutes)
+        MAX_SILENCE_SEC = 120      # allowed time since last output line (e.g., 1 minute)
+
+        now = time.time()
+        t0 = state.problem.data.get("_solve_start_t")
+        t_last = state.problem.data.get("_last_output_t")
+
+        # If start time missing (shouldn't happen), initialize defensively
+        if t0 is None:
+            state.problem.data["_solve_start_t"] = now
+            t0 = now
+        if t_last is None:
+            state.problem.data["_last_output_t"] = now
+            t_last = now
+
+        if now - t0 > MAX_WALL_SEC:
+            state.solution.status = "error"
+            state.problem.data["_stream_route"] = "terminate"
+            state.problem.data["_stream_reason"] = f"Timeout: exceeded max wall time ({MAX_WALL_SEC}s)"
+            return state
+
+        if now - t_last > MAX_SILENCE_SEC:
+            state.solution.status = "error"
+            state.problem.data["_stream_route"] = "terminate"
+            state.problem.data["_stream_reason"] = f"Timeout: no output for {MAX_SILENCE_SEC}s"
+            return state
 
         if not isinstance(poll, dict) or not poll.get("ok"):
             state.problem.data["_stream_route"] = "terminate"
@@ -582,7 +626,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
 
     def finalize(self, state: OptimizerState) -> OptimizerState:
         stream_log = state.problem.data.get("_stream_log", [])
-        tail = stream_log[-300:] if isinstance(stream_log, list) else []
+        tail = stream_log[-5000:] if isinstance(stream_log, list) else []
+
+        # print(tail)
 
         payload = {
             "formulation": state.problem.data.get("formulation", ""),
@@ -595,7 +641,9 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             "instructions": (
                 "Extract final solution. Return SolutionState with fields:\n"
                 "- status: one of {init, formulated, solving, feasible, optimal, infeasible, unbounded, stopped, error}\n"
-                "- x: dict var->value if available else null\n"
+                "- x: f stream contains a line like 'x=[...]', set x to that list of floats.\n"
+                  "     Otherwise if stream contains scalar assignments like 'var=value', set x to a dict.\n"
+                  "     Else null.\n"
                 "- obj: number if available else null\n"
                 "- history: leave empty (agent fills it)\n"
             ),
@@ -610,6 +658,8 @@ class OptimizationAgent(BaseAgent[OptimizerState]):
             ]
         )
         sol = llm_out["parsed"]  # expected SolutionState
+
+        print(sol)
 
         # write back into the canonical state.solution
         state.solution.status = sol["status"]

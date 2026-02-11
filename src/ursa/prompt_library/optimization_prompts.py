@@ -77,14 +77,11 @@ Choose:
 - optionally 0-3 fallback solver specs in candidates
 
 Guidelines:
-1) Prefer open-source defaults when unsure:
-   - LP/MILP: highs (via scipy or direct), or pulp+cbc, or ortools
-   - Convex QP: highs / osqp (via cvxpy if available)
-   - Smooth NLP: ipopt (if available) else scipy trust-constr/SLSQP
+1) Prefer open-source defaults when unsure.
 2) If integrality present, avoid pure continuous solvers.
-3) If nonconvex, choose methods that can handle it (ipopt for local; warn via options if needed).
+3) If nonconvex, choose methods that can handle it.
 4) Keep options conservative and widely supported:
-   - time_limit / max_iter / tol / verbosity / threads if appropriate
+   - time_limit / max_iter / tol / verbosity / threads / starting point if appropriate
 5) Return something that can realistically run in a typical Python environment.
 
 Output MUST conform to the expected structured schema (SolverPlan with primary + optional candidates).
@@ -141,7 +138,7 @@ There are two modes:
 1) Configure mode (pre-solve):
 Return ONLY a JSON object (dictionary) of solver options to apply.
 - Only include keys/values to merge into solver.primary.options.
-- Keep it minimal and safe (e.g., max_iter, tol, time_limit, verbose).
+- Keep it safe (e.g., max_iter, tol, time_limit, verbose, initial guess).
 
 2) Adjust mode (after termination):
 You must choose an action in {proceed, reformulate, finalize} and optionally propose a solver_options_patch.
@@ -170,13 +167,10 @@ Hard requirements:
 - At the end print ONE final status line containing exactly one of:
   OPTIMAL, FEASIBLE, INFEASIBLE, UNBOUNDED, ERROR
 - Also print variable assignments as simple lines like "x=..." and objective like "obj=...".
+- At the end, always print the obtained solution "x=..."
 
 Implementation guidelines:
-- Choose a Python approach consistent with the selected solver:
-  - scipy: use scipy.optimize (minimize / linprog) as appropriate
-  - ipopt: use cyipopt if available; otherwise fall back to scipy with a note in comments
-  - cvxpy: build a CVXPY problem and solve with an installed solver
-  - milp: use pulp or ortools if indicated
+- Choose a Python libraries (open source, prefarably) approach consistent with the selected solver
 - Be defensive: catch exceptions and print ERROR on failure.
 - Keep dependencies minimal; prefer widely available libraries.
 - Parse the formulation pragmatically: if exact symbolic parsing is hard, implement directly for the given variables/constraints.
