@@ -18,13 +18,15 @@ m = 0.1 kg
 l = 0.5 m
 g = 9.81 m/s^2
 Time horizon T = 4.0 s
-Use N = 80 uniform time steps (dt = T/N)
+Use a stable time-stepping scheme.
 
 State variables at each time step k = 0..N:
-x_k      = cart position (m)
-xdot_k   = cart velocity (m/s)
-theta_k  = pendulum angle (rad), measured from upright (theta=0 is upright, theta=pi is hanging down)
-thetadot_k = angular velocity (rad/s)
+x(t)      = cart position (m)
+xdot(t)   = cart velocity (m/s)
+theta(t)  = pendulum angle (rad), measured from upright (theta=0 is upright, theta=pi is hanging down)
+thetadot(t) = angular velocity (rad/s)
+x_ddot(t) = cart acceleration (m/s^2)
+theta_ddot(t) = angular acceleration (rad/s^2)
 
 Control variable at each time step k = 0..N-1:
 u_k = horizontal force applied to cart (N)
@@ -33,46 +35,41 @@ Dynamics (discrete-time via forward Euler):
 Let s = sin(theta_k), c = cos(theta_k)
 Denominator D = M + m - m*c^2
 
-x_{k+1}      = x_k      + dt * xdot_k
-theta_{k+1}  = theta_k  + dt * thetadot_k
+x_ddot(t) = ((u + m*s*(l*thetadot^2 + g*c)) / D )
 
-xdot_{k+1} = xdot_k + dt * ( (u_k + m*s*(l*thetadot_k^2 + g*c)) / D )
-
-thetadot_{k+1} = thetadot_k + dt * ( (-u_k*c - m*l*thetadot_k^2*c*s - (M+m)*g*s) / (l*D) )
+theta_ddot(t) = ( (-u_k*c - m*l*thetadot^2*c*s - (M+m)*g*s) / (l*D) )
 
 Objective (minimize):
-J = sum_{k=0}^{N-1} [  1e-3*u_k^2  +  1e-2*x_k^2  +  1e-3*xdot_k^2  +  5.0*(theta_k)^2  +  1e-2*thetadot_k^2 ] * dt
-    + terminal cost:
-      50.0*x_N^2 + 1.0*xdot_N^2 + 200.0*theta_N^2 + 5.0*thetadot_N^2
+Terminal state error + Overall control cost.
 
 Constraints:
 Initial conditions (k=0):
-x_0 = 0
-xdot_0 = 0
-theta_0 = pi
-thetadot_0 = 0
+x(0) = 0
+xdot(0) = 0
+theta(0) = pi
+thetadot(0) = 0
 
 Terminal target (soft via terminal cost, but also enforce tight bounds):
-|x_N| <= 0.05
-|xdot_N| <= 0.10
-|theta_N| <= 0.05
-|thetadot_N| <= 0.20
+|x(T)| <= 0.05
+|xdot(T)| <= 0.10
+|theta(T)| <= 0.05
+|thetadot(T)| <= 0.20
 
-Path bounds for all k:
-|x_k| <= 2.4
-|xdot_k| <= 10.0
-|thetadot_k| <= 20.0
-Control bounds for all k:
-|u_k| <= 15.0
+Path bounds for all t:
+|x(t)| <= 2.4
+|xdot(t)| <= 10.0
+|thetadot(t)| <= 20.0
+Control bounds for all t:
+|u(t)| <= 15.0
 
 Angle handling:
-Keep theta_k continuous (do not wrap). Use theta=0 as upright and theta=pi as downward.
+Keep theta(t) continuous (do not wrap). Use theta=0 as upright and theta=pi as downward.
 
 Notes:
 - This is a nonlinear, nonconvex optimal control problem. Use a suitable NLP approach.
 - Print progress during solving (iterations, objective, constraint violation) and flush output.
 - At the end print one line containing exactly one of: OPTIMAL, FEASIBLE, INFEASIBLE, UNBOUNDED, ERROR.
-- Also print representative values (at least x_N, theta_N, and the final objective) as:
+- Also print representative values (at least x(T), theta(T), and the final objective) as:
   xN=...
   thetaN=...
   obj=...

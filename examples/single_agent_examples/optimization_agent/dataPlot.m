@@ -1,8 +1,11 @@
 clear;
-dataset = load("C:\Users\393258\Documents\Gitlab\ursa\examples\single_agent_examples\optimization_agent\dataMaterials.csv");
+dataset = readtable("C:\Users\393258\Documents\Gitlab\ursa\examples\single_agent_examples\optimization_agent\dataMaterials.csv");
 %%
-comps = dataset(:,1:4);
-yields = dataset(:,5);
+%dataset = load("C:\Users\393258\Documents\Gitlab\ursa\examples\single_agent_examples\optimization_agent\dataMaterials.csv");
+%%
+dataColNames = dataset.Properties.VariableNames;
+comps = table2array(dataset(:,1:4));
+yields = table2array(dataset(:,5));
 elements = ["Ta","Nb","Mo","W"];
 %%
 figure(1);
@@ -20,17 +23,19 @@ end
 sgtitle("Yield vs Composition (per element)");
 
 %%
-thresh = 1.8;
+thresh = 1.5;
 idxthresh = find(yields>thresh);
+idxthresh = idxthresh(1:4:end);
 bestYields = yields(idxthresh);
 bestComps = comps(idxthresh,:);
 %%
-seriesNames = "Composition " + string(1:length(bestYields));
+bestcompstrun = floor(bestComps.*100)/100;
+seriesNames = join(string(bestcompstrun),", ",2);
 
 % (Optional) if you need a cell array of char vectors (older legend preferences)
 seriesNamesCell = cellstr(seriesNames);
 
-spiderPlot(bestComps,elements,seriesNamesCell,"Compositions with Yield>"+num2str(thresh),[0,1],5, bestYields);
+spiderPlot(bestComps,elements,seriesNamesCell,[],[0,1],5, bestYields);
 
 
 function spiderPlot(data, labels,seriesNames, titleName, rLimits, nRings, mag)

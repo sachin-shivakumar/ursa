@@ -96,7 +96,7 @@ You may be asked to produce structured output for one of two tasks:
 A) Stream routing (StreamRouting):
 Input will contain recent solver output lines under key 'recent_stream'.
 Decide:
-- route = "continue" if solver appears to be making progress or still running normally
+- route = "continue" if solver appears to be making progress: Look at progress of objective, infeasibility, constraint violation, etc. 
 - route = "terminate" if solver is stuck, diverging, repeating, or clearly failing/hanging
 - route = "done" if solver has finished (final status printed, or clear termination)
 
@@ -161,6 +161,7 @@ You will be given:
 - explicit requirements
 
 Hard requirements:
+- Do not use any unicode strings or characters in the code. Stick to plain text.
 - Output ONLY valid Python code (no markdown, no backticks).
 - The code must run as a script: include imports, main guard if appropriate.
 - Print iterative progress frequently and use flush=True.
