@@ -23,9 +23,9 @@ end
 sgtitle("Yield vs Composition (per element)");
 
 %%
-thresh = 1.5;
+thresh = 1.3;
 idxthresh = find(yields>thresh);
-idxthresh = idxthresh(1:4:end);
+idxthresh = idxthresh(1:6:end);
 bestYields = yields(idxthresh);
 bestComps = comps(idxthresh,:);
 %%
