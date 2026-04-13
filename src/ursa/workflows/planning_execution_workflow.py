@@ -1,7 +1,4 @@
-import sqlite3
-from pathlib import Path
-
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from rich import get_console
 from rich.panel import Panel
 
@@ -18,20 +15,23 @@ class PlanningExecutorWorkflow(BaseWorkflow):
         - The list is passed, entry by entry to an execution agent to carry out the plan.
     """
 
-    def __init__(self, planner, executor, workspace, **kwargs):
+    def __init__(self, planner, executor, workspace=None, **kwargs):
         super().__init__(**kwargs)
         self.planner = planner
         self.executor = executor
         self.workspace = workspace
 
+        # FIXME: DOES NOT CURRENTLY WORK IN WEB INTERFACE WITH
+        # SQL checkpointing
+        # MOVING TO IN MEMORY CHECKPOINTING FOR NOW
         # Setup checkpointing
-        db_path = Path(workspace) / "checkpoint.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
+        # db_path = Path(workspace) / "checkpoint.db"
+        # db_path.parent.mkdir(parents=True, exist_ok=True)
+        # conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        # checkpointer = SqliteSaver(conn)
 
-        self.planner.checkpointer = checkpointer
-        self.executor.checkpointer = checkpointer
+        self.planner.checkpointer = InMemorySaver()
+        self.executor.checkpointer = InMemorySaver()
 
     def _invoke(self, task: str, **kw):
         with console.status(
@@ -96,9 +96,6 @@ def main():
 
     tid = "run-" + uuid4().hex[:8]
 
-    # Define the workspace
-    workspace = "example_fibonacci_finder"
-
     # Define a simple problem
     index_to_find = 35
 
@@ -122,9 +119,7 @@ def main():
     )
 
     # Initialize workflow
-    workflow = PlanningExecutorWorkflow(
-        planner=planner, executor=executor, workspace=workspace
-    )
+    workflow = PlanningExecutorWorkflow(planner=planner, executor=executor)
 
     # Run problem through the workflow
     workflow(problem)

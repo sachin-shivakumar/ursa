@@ -1,6 +1,8 @@
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
+from os import environ
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
@@ -27,6 +29,9 @@ class ModelConfig(BaseModel):
     base_url: str | None = None
     """Base URL for model API access"""
 
+    api_key_env: str | None = None
+    """Environmental variable containing the API key for this session"""
+
     max_completion_tokens: int | None = None
     """Maximum tokens for LLM to output"""
 
@@ -41,6 +46,8 @@ class ModelConfig(BaseModel):
         kwargs = {k: v for k, v in self.model_dump().items() if v is not None}
         if kwargs.pop("ssl_verify", None) is False:
             kwargs["http_client"] = httpx.Client(verify=False)
+        if api_key_env := kwargs.pop("api_key_env", None):
+            kwargs["api_key"] = environ.get(api_key_env, None)
         return kwargs
 
 
@@ -96,6 +103,8 @@ class UrsaConfig(BaseModel):
         )
         with open(path, "r") as fid:
             data = loader(fid)
+
+        data = deep_interp_env(data)
 
         return cls.model_validate(data)
 
@@ -159,3 +168,44 @@ def deep_merge_dicts(
         else:
             merged[key] = value
     return merged
+
+
+ENV_SUB_REGEX = re.compile(r"\${(?P<env>\w+)(?::(?P<default>.+))?}")
+
+
+def deep_interp_env(x: dict[str, Any] | str | Any):
+    """Interpolate all environment variables in stored keys"""
+    if isinstance(x, dict):
+        return {k: deep_interp_env(v) for k, v in x.items()}
+    elif isinstance(x, str):
+        return interpolate_env(x)
+    else:
+        return x
+
+
+def interpolate_env(value: str) -> str:
+    """
+    Interpolate environment variables in a string
+
+    Supported patterns:
+        ${VAR}
+            Replaced with the value of VAR if set, otherwise an empty string.
+
+        ${VAR:DEFAULT}
+            Replaced with the value of VAR if set; otherwise replaced with
+            DEFAULT.
+
+    Args:
+        value: The input string containing zero or more environment
+            variable expressions.
+
+    Returns:
+        The input string with all supported environment variable
+        expressions expanded.
+    """
+
+    def interpolate_env(m: re.Match[str]) -> str:
+        groups = m.groupdict("")
+        return environ.get(groups["env"], default=groups["default"])
+
+    return ENV_SUB_REGEX.sub(interpolate_env, value)

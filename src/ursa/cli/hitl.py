@@ -9,18 +9,21 @@ from typing import Any, Optional
 
 import aiosqlite
 from fastmcp import FastMCP
-from langchain.chat_models import init_chat_model
+from langchain.chat_models import BaseChatModel, init_chat_model
 from langchain.embeddings import init_embeddings
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 from rich.theme import Theme
 
 from ursa import agents
 from ursa.agents import BaseAgent
 from ursa.agents.base import AgentWithTools
 from ursa.cli.config import UrsaConfig
+from ursa.util.has_optional_dep_group import has_optional_dep_group
 from ursa.util.mcp import start_mcp_client
 from ursa.util.memory_logger import AgentMemory
 
@@ -90,6 +93,14 @@ class AgentHITL:
         return msg
 
 
+def get_base_url(model: BaseChatModel) -> str | None:
+    for attr in ["base_url", "api_base", "openai_api_base"]:
+        if base_url := getattr(model, attr, None):
+            return base_url
+    logging.warning(f"Missing base_url for {model}")
+    return None
+
+
 class HITL:
     def __init__(self, config: UrsaConfig):
         self.config = config
@@ -101,7 +112,9 @@ class HITL:
         agent_overrides = dict(config.agent_config or {})
         memory_overrides = agent_overrides.pop("memory", None)
 
-        self.model = init_chat_model(**self.config.llm_model.kwargs)
+        self.model: BaseChatModel = init_chat_model(
+            **self.config.llm_model.kwargs
+        )
         self.embedding = (
             init_embeddings(**self.config.emb_model.kwargs)
             if self.config.emb_model
@@ -117,10 +130,26 @@ class HITL:
             if self.embedding
             else None
         )
+        if base_url := getattr(self.config.llm_model, "base_url"):
+            if model_base_url := get_base_url(self.model):
+                if base_url != model_base_url:
+                    logging.error(
+                        f"Model base url ({model_base_url}) and config ({base_url}) do not match"
+                    )
+
+        if self.embedding:
+            if base_url := getattr(self.config.emb_model, "base_url"):
+                if model_base_url := get_base_url(self.model):
+                    if base_url != model_base_url:
+                        logging.error(
+                            f"Model base url ({model_base_url}) and config ({base_url}) do not match"
+                        )
 
         self.agents: dict[str, AgentHITL] = {}
         self.agents["chat"] = AgentHITL(agent_class=agents.ChatAgent)
         self.agents["arxiv"] = AgentHITL(agent_class=agents.ArxivAgent)
+        if has_optional_dep_group("dsi"):
+            self.agents["dsi"] = AgentHITL(agent_class=agents.DSIAgent)
         self.agents["execute"] = AgentHITL(
             agent_class=agents.ExecutionAgent,
             config={"agent_memory": self.memory},
@@ -130,6 +159,9 @@ class HITL:
         )
         self.agents["plan"] = AgentHITL(agent_class=agents.PlanningAgent)
         self.agents["web"] = AgentHITL(agent_class=agents.WebSearchAgent)
+
+        if has_optional_dep_group("lammps"):
+            self.agents["lammps"] = AgentHITL(agent_class=agents.LammpsAgent)
 
         if self.memory is not None:
             self.agents["recall"] = AgentHITL(
@@ -168,7 +200,7 @@ class HITL:
                 workspace=self.workspace,
                 checkpointer=checkpointer,
                 mcp_client=self.mcp_client,
-                thread_id=f"{self.thread_id}_{name}",
+                thread_id=f"{self.thread_id}",
             )
 
         assert agent._agent is not None
@@ -188,9 +220,7 @@ class HITL:
         mcp = FastMCP(
             "URSA",
             version=ursa_version,
-            on_duplicate_tools="error",
-            on_duplicate_prompts="error",
-            on_duplicate_resources="error",
+            on_duplicate="error",
             **kwargs,
         )
 
@@ -245,6 +275,38 @@ class UrsaRepl(Cmd):
                 "emph": "bold cyan",
             }),
         )
+
+        base_url = get_base_url(self.hitl.model)
+        if not base_url:
+            base_url = "Default"
+
+        try:
+            model_name = self.hitl.model.model_name
+        except Exception:
+            model_name = self.hitl.model.model
+        self.llm_model_panel = Panel.fit(
+            Text.from_markup(
+                f"[bold]LLM endpoint[/]: {base_url}\n"
+                f"[bold]LLM model[/]: {model_name}"
+            ),
+            border_style="cyan",
+        )
+        self.emb_model_panel = None
+        if self.hitl.embedding:
+            base_url = get_base_url(self.hitl.embedding)
+            if not base_url:
+                base_url = "Default"
+            try:
+                model_name = self.hitl.embedding.model_name
+            except Exception:
+                model_name = self.hitl.embedding.model
+            self.emb_model_panel = Panel.fit(
+                Text.from_markup(
+                    f"[bold]Embedding endpoint[/]: {base_url}\n"
+                    f"[bold]Embedding model[/]: {model_name}"
+                ),
+                border_style="cyan",
+            )
 
     def __getattribute__(self, name: str) -> Any:
         # Dynamically add do_agent methods
@@ -308,6 +370,9 @@ class UrsaRepl(Cmd):
         """Handle Ctrl+C to avoid quitting the program"""
         # Print intro only once.
         self.show(f"[magenta]{ursa_banner}", markdown=False, highlight=False)
+        self.show(self.llm_model_panel, markdown=False, highlight=False)
+        if self.emb_model_panel:
+            self.show(self.emb_model_panel, markdown=False, highlight=False)
         self.show(self._help_message, markdown=False)
 
         while True:
