@@ -61,6 +61,7 @@ from ursa.prompt_library.execution_prompts import (
     recap_prompt,
 )
 from ursa.tools import edit_code, read_file, run_command, write_code
+from ursa.tools.read_image_tool import read_image_tool
 from ursa.tools.search_tools import (
     run_arxiv_search,
     run_osti_search,
@@ -170,7 +171,8 @@ class ExecutionAgent(AgentWithTools, BaseAgent[ExecutionState]):
             edit_code, read_file, run_web_search, run_osti_search, run_arxiv_search),
             keyed by tool name for quick lookups.
         tool_node (ToolNode): Graph node that dispatches tool calls.
-        llm (BaseChatModel): LLM instance bound to the available tools.
+        llm (BaseChatModel): Base LLM instance used for summaries and recap.
+        tool_llm (BaseChatModel): Tool-bound LLM used for the execution loop.
 
     Methods:
         query_executor(state): Send messages to the executor LLM, ensure
@@ -204,6 +206,7 @@ class ExecutionAgent(AgentWithTools, BaseAgent[ExecutionState]):
             write_code,
             edit_code,
             read_file,
+            read_image_tool,
             run_web_search,
             run_osti_search,
             run_arxiv_search,
@@ -220,6 +223,7 @@ class ExecutionAgent(AgentWithTools, BaseAgent[ExecutionState]):
         self.log_state = log_state
         self.tokens_before_summarize = tokens_before_summarize
         self.messages_to_keep = messages_to_keep
+        self.tool_llm = llm
 
     def _patch_dangling(
         self, state: ExecutionState, summarized: bool
@@ -424,7 +428,7 @@ class ExecutionAgent(AgentWithTools, BaseAgent[ExecutionState]):
 
         # 4) Invoke the LLM with the prepared message sequence.
         try:
-            response = self.llm.invoke(
+            response = self.tool_llm.invoke(
                 messages, self.build_config(tags=["agent"])
             )
             new_state["messages"].append(response)
@@ -532,9 +536,10 @@ class ExecutionAgent(AgentWithTools, BaseAgent[ExecutionState]):
     def _build_graph(self):
         """Construct and compile the agent's LangGraph state machine."""
 
-        # Bind tools to llm and context summarizer
-
-        self.llm = self.llm.bind_tools(self.tools.values())
+        # Keep self.llm unbound for summary/recap calls. The executor loop uses a
+        # separate tool-bound model so provider-specific tool transcripts cannot
+        # leak into summarization history.
+        self.tool_llm = self.llm.bind_tools(self.tools.values())
 
         # Register nodes:
         # - "agent": LLM planning/execution step
