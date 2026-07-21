@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from typing import Any, Callable, Iterable
+
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.runnables import Runnable
+
+
+# --- if you already have your own versions, reuse them ---
+def _parse_args(v: Any) -> dict[str, Any]:
+    if v is None:
+        return {}
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return {"_raw": v}
+    return {"_raw": v}
+
+
+def extract_tool_calls(msg: AIMessage) -> list[dict[str, Any]]:
+    # Prefer normalized field
+    if msg.tool_calls:
+        out = []
+        for tc in msg.tool_calls:
+            name = getattr(tc, "name", None) or tc.get("name")
+            args = getattr(tc, "args", None) or tc.get("args")
+            call_id = getattr(tc, "id", None) or tc.get("id")
+            out.append({"name": name, "args": _parse_args(args), "id": call_id})
+        return out
+
+    # Fallbacks (OpenAI raw payloads)
+    ak = msg.additional_kwargs or {}
+    if ak.get("tool_calls"):
+        out = []
+        for tc in ak["tool_calls"]:
+            fn = tc.get("function", {}) or {}
+            out.append({
+                "name": fn.get("name"),
+                "args": _parse_args(fn.get("arguments")),
+                "id": tc.get("id"),
+            })
+        return out
+
+    if ak.get("function_call"):
+        fn = ak["function_call"]
+        return [
+            {
+                "name": fn.get("name"),
+                "args": _parse_args(fn.get("arguments")),
+                "id": None,
+            }
+        ]
+    return []
+
+
+# -----------------------------------------------------------------------------
+
+
+ToolRegistry = dict[str, Runnable | Callable[..., Any]]
+
+
+def _stringify_output(x: Any) -> str:
+    if isinstance(x, str):
+        return x
+    try:
+        return json.dumps(x, ensure_ascii=False)
+    except Exception:
+        return str(x)
+
+
+def _invoke_tool(
+    tool: Runnable | Callable[..., Any], args: dict[str, Any]
+) -> Any:
+    """Invoke a tool from a synchronous context.
+
+    Some tool implementations (notably MCP-adapted tools exposed as
+    StructuredTool instances) are *async-only* and will raise an error like
+    "... does not support sync invocation" when `.invoke()` is used.
+
+    For those tools we fall back to running `.ainvoke()` in a fresh event
+    loop when possible.
+    """
+
+    # Runnable (LangChain tools & chains)
+    if isinstance(tool, Runnable):
+        try:
+            return tool.invoke(args)
+        except Exception as e:
+            if "does not support sync invocation" in str(e) and hasattr(
+                tool, "ainvoke"
+            ):
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    return asyncio.run(tool.ainvoke(args))
+
+                raise RuntimeError(
+                    "Async-only tool was invoked from within a running event loop. "
+                    "Use `await tool.ainvoke(...)` (or provide an async caller) instead."
+                ) from e
+            raise
+
+    # Plain callable
+    try:
+        return tool(**args)
+    except TypeError:
+        # Some tools expect a single positional payload
+        return tool(args)
+
+
+def run_tool_calls(
+    ai_msg: AIMessage,
+    tools: ToolRegistry | Iterable[Runnable | Callable[..., Any]],
+) -> list[BaseMessage]:
+    """
+    Args:
+        ai_msg: The LLM's AIMessage containing tool calls.
+        tools: Either a dict {name: tool} or an iterable of tools (must have `.name`
+               for mapping). Each tool can be a Runnable or a plain callable.
+
+    Returns:
+        out: list[BaseMessage] to feed back to the model
+    """
+    # Build a name->tool map
+    if isinstance(tools, dict):
+        registry: ToolRegistry = tools  # type: ignore
+    else:
+        registry = {}
+        for t in tools:
+            name = getattr(t, "name", None) or getattr(t, "__name__", None)
+            if not name:
+                raise ValueError(f"Tool {t!r} has no discoverable name.")
+            registry[name] = t  # type: ignore
+
+    calls = extract_tool_calls(ai_msg)
+
+    if not calls:
+        return []
+
+    out: list[BaseMessage] = []
+    for call in calls:
+        name = call.get("name")
+        args = call.get("args", {}) or {}
+        call_id = call.get("id") or f"call_{uuid.uuid4().hex}"
+
+        # 1) the AIMessage that generated the call
+        out.append(ai_msg)
+
+        # 2) the ToolMessage with the execution result (or error)
+        if name not in registry:
+            content = f"ERROR: unknown tool '{name}'."
+        else:
+            try:
+                result = _invoke_tool(registry[name], args)
+                content = _stringify_output(result)
+            except Exception as e:
+                content = f"ERROR: {type(e).__name__}: {e}"
+
+        out.append(
+            ToolMessage(content=content, tool_call_id=call_id, name=name)
+        )
+
+    return out

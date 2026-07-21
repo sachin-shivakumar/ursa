@@ -1,0 +1,43 @@
+.DS_Store
+*.png
+*.csv
+iteration*txt
+*.swp
+.env
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.sql
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+workspace/
+workspace_*/
+
+# Data
+moleculeDiscovery/
+materialDiscovery/
+
+# ursa
+src/ursa/util/agent_memory_db/
+tmp/
+site
+.ursa/
+.ursa_metrics
+ursa_metrics
+arxiv_generated_summaries
+arxiv_papers
+*.sqfs
+ursa_workspace/
+.vscode/settings.json
+scratch/
+
+# Jupyter-generated files
+.ipynb_checkpoints
+Untitled.*
